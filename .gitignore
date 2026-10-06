@@ -1,0 +1,12 @@
+# clasp — contains your personal scriptId, never commit
+.clasp.json
+.clasprc.json
+
+# node
+node_modules/
+npm-debug.log*
+
+# editor / OS
+.DS_Store
+.vscode/
+*.swp

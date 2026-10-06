@@ -1,0 +1,20 @@
+{
+  "name": "google-drive-lab-notebook",
+  "version": "1.0.0",
+  "description": "A Google Apps Script lab notebook, inventory and budget-projection app backed by Google Sheets and Google Drive.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "login": "clasp login",
+    "create": "clasp create --type webapp --title \"Lab Notebook\" --rootDir src",
+    "push": "clasp push",
+    "watch": "clasp push --watch",
+    "pull": "clasp pull",
+    "open": "clasp open",
+    "deploy": "clasp deploy --description \"lab-notebook release\"",
+    "logs": "clasp logs --watch"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2"
+  }
+}
