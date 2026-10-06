@@ -5,6 +5,11 @@ About ten minutes, most of it spent on Google's permission screens.
 You need a Google account and [Node.js](https://nodejs.org) 18 or newer.
 You do not need a Google Cloud project, a billing account or a domain.
 
+> **On Linux Mint, use [SETUP-LINUX-MINT.md](SETUP-LINUX-MINT.md)
+> instead.** Mint's `apt` carries a Node too old for the tooling, and
+> the dedicated guide covers that plus git authentication and the daily
+> workflow.
+
 ---
 
 ## 1. Install the tooling

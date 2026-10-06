@@ -19,6 +19,11 @@ what Google already gives you.
 > This is an organisation and record-keeping tool. It does no design
 > work — it keeps track of the design work you do elsewhere.
 
+> **Branch note:** the app currently lives on
+> `claude/wonderful-pascal-sm4kyc`, not `main`. Clone and then
+> `git checkout claude/wonderful-pascal-sm4kyc`, or merge it into `main`
+> when you are happy with it.
+
 ## Why Apps Script
 
 The data is a spreadsheet you own and can open, sort and export without
@@ -29,8 +34,15 @@ a nicer UI would be.
 
 ## Getting started
 
-See **[docs/SETUP.md](docs/SETUP.md)** — about ten minutes, most of it
-waiting for Google's permission screens.
+**On a Linux Mint desktop, start here:
+[docs/SETUP-LINUX-MINT.md](docs/SETUP-LINUX-MINT.md)** — a cold-start
+walkthrough from an empty machine, including installing Node the way
+that actually works on Mint (not `apt`), authenticating git so you can
+push changes back, and the deploy-vs-push distinction that trips
+everyone up.
+
+On any other platform, **[docs/SETUP.md](docs/SETUP.md)** — about ten
+minutes, most of it waiting for Google's permission screens.
 
 The short version:
 
@@ -75,6 +87,7 @@ A few decisions worth knowing about:
 
 | Document | What's in it |
 |---|---|
+| [docs/SETUP-LINUX-MINT.md](docs/SETUP-LINUX-MINT.md) | Cold start on a Mint desktop, git auth, daily workflow |
 | [docs/SETUP.md](docs/SETUP.md) | Install, deploy, update, troubleshoot |
 | [docs/USER-GUIDE.md](docs/USER-GUIDE.md) | Day-to-day use, worked example |
 | [docs/DATA-MODEL.md](docs/DATA-MODEL.md) | Tables, fields, budget arithmetic |
