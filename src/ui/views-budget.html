@@ -1,0 +1,317 @@
+<script>
+/* ============================== Budget ============================= */
+
+var BudgetView = {
+
+  /* --------------------- per-project budget tab -------------------- */
+
+  renderProject: function (body, project) {
+    body.innerHTML = loadingPane('Working out the projection…');
+
+    App.rpc('budget.detail', { projectId: project.id }).then(function (detail) {
+      if (!body.isConnected) return;
+      var snap = detail.snapshot;
+      var tone = budgetTone(snap.percentForecast);
+
+      body.innerHTML =
+        '<div class="grid grid-4" style="margin-bottom:16px">' +
+          App.statTile('Budget', snap.budget > 0 ? money(snap.budget, { round: true }) : 'Not set',
+            snap.budget > 0 ? severityBadge(tone.tone, tone.label) : 'Set one in project settings') +
+          App.statTile('Spent to date', money(snap.actual, { round: true }),
+            snap.budget > 0 ? pct(snap.percentUsed) + ' of budget' : 'Purchases + recurring + materials') +
+          App.statTile('Forecast total', money(snap.forecast, { round: true }),
+            'Including ' + money(snap.committed, { round: true }) + ' committed') +
+          App.statTile('Left to spend', money(snap.available, { round: true }),
+            snap.available < 0
+              ? severityBadge('critical', 'Over by ' + money(Math.abs(snap.available), { round: true }))
+              : 'After committed and planned') +
+        '</div>' +
+
+        (detail.exhaustedMonth && snap.budget > 0
+          ? '<div class="alert is-warning" style="margin-bottom:14px">' +
+            '<span class="alert-icon" aria-hidden="true">▲</span><div>' +
+            '<strong>Forecast to exceed budget in ' + esc(detail.exhaustedLabel) + '.</strong> ' +
+            'At the current burn rate of ' + money(detail.burnRate) + ' a month' +
+            (detail.runwayMonths !== null && detail.runwayMonths > 0
+              ? ', the remaining ' + money(snap.remaining) + ' lasts about ' +
+                detail.runwayMonths.toFixed(1) + ' months'
+              : '') + '.</div></div>'
+          : '') +
+
+        '<div class="card" style="margin-bottom:14px">' +
+          '<div class="card-head"><h2>Cumulative spend against budget</h2>' +
+            '<div class="spacer"></div>' +
+            '<span class="small muted">Next ' + detail.horizonMonths + ' months</span></div>' +
+          '<div class="card-pad"><div id="chart-burn"></div></div>' +
+        '</div>' +
+
+        '<div class="grid grid-2" style="align-items:start">' +
+          '<div class="card">' +
+            '<div class="card-head"><h2>Spend by month</h2></div>' +
+            '<div class="card-pad"><div id="chart-monthly"></div></div>' +
+          '</div>' +
+          '<div class="card">' +
+            '<div class="card-head"><h2>Where the money goes</h2></div>' +
+            '<div class="card-pad"><div id="chart-category"></div></div>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="grid grid-2" style="align-items:start;margin-top:14px">' +
+          BudgetView.recurringCard(detail) +
+          BudgetView.bomCard(detail) +
+        '</div>' +
+
+        (detail.materials.length ? BudgetView.materialsCard(detail) : '') +
+
+        '<div class="card card-pad" style="margin-top:14px">' +
+          '<h3 style="margin-bottom:6px">How these numbers are built</h3>' +
+          '<p class="small secondary" style="margin-bottom:6px"><strong>Spent</strong> is ' +
+            'received purchases, plus recurring costs that have already fallen due, plus ' +
+            'materials drawn from shared stock.</p>' +
+          '<p class="small secondary" style="margin-bottom:0"><strong>Materials</strong> only ' +
+            'counts the share of consumed stock that this project did not already pay for ' +
+            'on its own purchase orders — otherwise a part bought here and used here would ' +
+            'be charged twice.</p>' +
+        '</div>';
+
+      renderBudgetChart(document.getElementById('chart-burn'), detail);
+      renderMonthlyBars(document.getElementById('chart-monthly'), detail.series);
+      renderCategoryBars(document.getElementById('chart-category'), detail.byCategory);
+
+      App.bind(body, {
+        'add-recurring': function () { BudgetView.openRecurring(null, project.id); },
+        'edit-recurring': function (dataset) {
+          var row = null;
+          detail.recurring.forEach(function (r) { if (r.id === dataset.id) row = r; });
+          if (row) BudgetView.openRecurring(row, project.id);
+        },
+        'rm-recurring': function (dataset) {
+          Modal.confirm({
+            title: 'Remove this recurring cost?',
+            message: 'It stops counting towards the forecast from now on.',
+            submitLabel: 'Remove'
+          }).then(function (confirmed) {
+            if (!confirmed) return;
+            App.call('budget.deleteRecurring', { id: dataset.id }).then(function () {
+              Toast.ok('Removed.');
+              App.reload();
+            });
+          });
+        },
+        'add-purchase': function () { Purchases.openEditor(null, project.id); },
+        'go-bom': function (dataset) {
+          App.navigate('#/project/' + project.id + '/boms?bom=' + dataset.id);
+        }
+      });
+    }).catch(function (err) {
+      body.innerHTML = '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  recurringCard: function (detail) {
+    var rows = detail.recurring || [];
+    var monthly = rows.filter(function (r) { return r.active; })
+      .reduce(function (sum, r) { return sum + r.monthlyEquivalent; }, 0);
+
+    return '<div class="card">' +
+      '<div class="card-head"><h2>Recurring costs</h2><div class="spacer"></div>' +
+        (monthly > 0 ? '<span class="badge">' + money(monthly) + '/mo</span> ' : '') +
+        '<button class="btn btn-sm" data-action="add-recurring">+ Add</button></div>' +
+      (rows.length
+        ? '<div class="table-wrap"><table class="data"><thead><tr>' +
+            '<th>Name</th><th class="num">Amount</th><th>Cadence</th>' +
+            '<th class="num">Per month</th><th></th></tr></thead><tbody>' +
+          rows.map(function (row) {
+            return '<tr' + (row.active ? '' : ' class="muted"') + '>' +
+              '<td>' + esc(row.name) +
+                (row.active ? '' : ' <span class="badge">Inactive</span>') +
+                (row.endDate ? '<div class="tiny muted">ends ' + fmtDate(row.endDate) + '</div>' : '') +
+              '</td>' +
+              '<td class="num">' + money(row.amount) + '</td>' +
+              '<td class="small">' + esc(titleCase(row.cadence)) + '</td>' +
+              '<td class="num">' + money(row.monthlyEquivalent) + '</td>' +
+              '<td class="right nowrap">' +
+                '<button class="btn btn-sm btn-ghost" data-action="edit-recurring" ' +
+                  'data-id="' + attr(row.id) + '" aria-label="Edit">✎</button>' +
+                '<button class="btn btn-sm btn-ghost" data-action="rm-recurring" ' +
+                  'data-id="' + attr(row.id) + '" aria-label="Remove">×</button>' +
+              '</td></tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<div class="card-pad small muted">Subscriptions, bench rental, cloud bills — ' +
+          'anything that lands on a cadence. These drive the forward projection.</div>') +
+      '</div>';
+  },
+
+  bomCard: function (detail) {
+    var rows = detail.bomCommitments || [];
+    return '<div class="card">' +
+      '<div class="card-head"><h2>Build costs from BOMs</h2></div>' +
+      (rows.length
+        ? '<div class="table-wrap"><table class="data"><thead><tr>' +
+            '<th>BOM</th><th class="num">Qty</th><th class="num">Per unit</th>' +
+            '<th class="num">Build</th><th class="num">To buy</th></tr></thead><tbody>' +
+          rows.map(function (row) {
+            return '<tr class="clickable" data-action="go-bom" data-id="' + attr(row.bomId) + '">' +
+              '<td>' + esc(row.name) + ' <span class="muted small">rev ' + esc(row.revision) + '</span>' +
+                (row.unpricedLines
+                  ? '<div class="tiny" style="color:var(--status-warning)">▲ ' +
+                    row.unpricedLines + ' unpriced</div>' : '') +
+              '</td>' +
+              '<td class="num">' + row.buildQty + '</td>' +
+              '<td class="num">' + money(row.unitCost) + '</td>' +
+              '<td class="num bold">' + money(row.buildCost, { round: true }) + '</td>' +
+              '<td class="num">' + (row.shortfallCost > 0
+                ? money(row.shortfallCost) : '<span class="muted">—</span>') + '</td></tr>';
+          }).join('') + '</tbody></table></div>' +
+          '<div class="card-pad tiny muted">Build costs are what a run <em>would</em> cost. ' +
+            'They only enter the budget once parts are bought or drawn from stock.</div>'
+        : '<div class="card-pad small muted">No bills of materials in this project yet.</div>') +
+      '</div>';
+  },
+
+  materialsCard: function (detail) {
+    return '<div class="card" style="margin-top:14px">' +
+      '<div class="card-head"><h2>Materials drawn from stock</h2><div class="spacer"></div>' +
+        '<span class="small muted">Charged at the share this project had not already bought</span></div>' +
+      '<div class="table-wrap"><table class="data"><thead><tr>' +
+        '<th>Date</th><th>Part</th><th class="num">Qty</th><th class="num">Gross value</th>' +
+        '<th class="num">Charged</th></tr></thead><tbody>' +
+      detail.materials.slice(0, 25).map(function (row) {
+        return '<tr><td class="nowrap small">' + fmtDate(row.date) + '</td>' +
+          '<td>' + esc(row.itemName) + '</td>' +
+          '<td class="num">' + qty(row.quantity) + '</td>' +
+          '<td class="num muted">' + money(row.grossValue) + '</td>' +
+          '<td class="num bold">' + money(row.amount) +
+            (row.unbilledFraction < 1
+              ? '<div class="tiny muted">' + pct(row.unbilledFraction * 100) + ' unbilled</div>'
+              : '') + '</td></tr>';
+      }).join('') + '</tbody></table></div></div>';
+  },
+
+  openRecurring: function (rec, projectId) {
+    var isNew = !rec;
+    var r = rec || {
+      name: '', amount: 0, cadence: 'monthly', category: 'services',
+      startDate: new Date().toISOString().slice(0, 10), endDate: '', active: true, note: ''
+    };
+
+    Modal.open({
+      title: isNew ? 'New recurring cost' : 'Edit recurring cost',
+      submitLabel: isNew ? 'Add cost' : 'Save changes',
+      body:
+        fieldRow(
+          fieldText('name', 'Name', r.name, { required: true, placeholder: 'EDA suite seat' }),
+          fieldNumber('amount', 'Amount per occurrence', r.amount, { min: 0 })
+        ) +
+        fieldRow(
+          fieldSelect('cadence', 'Cadence', r.cadence, App.enums.cadence),
+          fieldSelect('category', 'Category', r.category, App.enums.purchaseCategory)
+        ) +
+        fieldRow(
+          fieldDate('startDate', 'Starts', r.startDate),
+          fieldDate('endDate', 'Ends (optional)', r.endDate, {
+            hint: 'Leave blank to run indefinitely.'
+          })
+        ) +
+        (isNew ? '' : fieldCheck('active', 'Active', r.active)) +
+        fieldText('note', 'Note', r.note),
+      onSubmit: function (values) {
+        values.projectId = projectId;
+        if (!isNew) values.id = rec.id;
+        return App.call(isNew ? 'budget.createRecurring' : 'budget.updateRecurring', values)
+          .then(function () {
+            Toast.ok(isNew ? 'Recurring cost added.' : 'Saved.');
+            App.reload();
+          });
+      }
+    });
+  },
+
+  /* ------------------------ portfolio budget ----------------------- */
+
+  renderPortfolio: function (host) {
+    host.innerHTML = App.pageHead('Budget', 'Every project’s position in one place.') +
+      '<div id="bp-body">' + loadingPane() + '</div>';
+
+    App.rpc('budget.overview').then(function (overview) {
+      var pane = document.getElementById('bp-body');
+      if (!pane) return;
+      var totals = overview.totals;
+
+      if (!overview.projects.length) {
+        pane.innerHTML = emptyState('◧', 'No projects to budget',
+          'Create a project and give it a budget to see the picture here.');
+        return;
+      }
+
+      var overrunning = overview.projects.filter(function (p) { return p.forecastOverBudget; });
+
+      pane.innerHTML =
+        '<div class="grid grid-4" style="margin-bottom:16px">' +
+          App.statTile('Total budget', money(totals.budget, { round: true }),
+            pluralise(overview.projects.length, 'open project')) +
+          App.statTile('Spent', money(totals.actual, { round: true }),
+            totals.budget > 0 ? pct((totals.actual / totals.budget) * 100) + ' of budget' : '') +
+          App.statTile('Committed', money(totals.committed, { round: true }), 'On order') +
+          App.statTile('Forecast', money(totals.forecast, { round: true }),
+            overrunning.length
+              ? severityBadge('warning', pluralise(overrunning.length, 'project') + ' overrunning')
+              : severityBadge('good', 'All within budget')) +
+        '</div>' +
+
+        '<div class="card">' +
+          '<div class="card-head"><h2>By project</h2><div class="spacer"></div>' +
+            '<button class="btn btn-sm" data-action="export">Export CSV</button></div>' +
+          '<div class="table-wrap"><table class="data"><thead><tr>' +
+            '<th>Project</th><th>Status</th><th class="num">Budget</th>' +
+            '<th class="num">Spent</th><th class="num">Committed</th>' +
+            '<th class="num">Planned</th><th class="num">Forecast</th>' +
+            '<th class="num">Left</th><th>Health</th>' +
+          '</tr></thead><tbody>' +
+          overview.projects.map(function (row) {
+            var tone = budgetTone(row.percentForecast);
+            return '<tr class="clickable" data-action="open" data-id="' + attr(row.id) + '">' +
+              '<td><div class="bold">' + esc(row.code) + '</div>' +
+                '<div class="small muted truncate" style="max-width:200px">' +
+                esc(row.name) + '</div></td>' +
+              '<td>' + badge(row.status) + '</td>' +
+              '<td class="num">' + (row.budget > 0 ? money(row.budget, { round: true }) : '—') + '</td>' +
+              '<td class="num">' + money(row.actual, { round: true }) + '</td>' +
+              '<td class="num muted">' + money(row.committed, { round: true }) + '</td>' +
+              '<td class="num muted">' + money(row.planned, { round: true }) + '</td>' +
+              '<td class="num bold">' + money(row.forecast, { round: true }) + '</td>' +
+              '<td class="num" style="color:' +
+                (row.available < 0 ? 'var(--status-critical)' : 'inherit') + '">' +
+                (row.budget > 0 ? money(row.available, { round: true }) : '—') + '</td>' +
+              '<td>' + (row.budget > 0
+                ? severityBadge(tone.tone, tone.label)
+                : '<span class="muted small">No budget</span>') + '</td></tr>';
+          }).join('') +
+          '</tbody><tfoot><tr>' +
+            '<td colspan="2">Total</td>' +
+            '<td class="num">' + money(totals.budget, { round: true }) + '</td>' +
+            '<td class="num">' + money(totals.actual, { round: true }) + '</td>' +
+            '<td class="num">' + money(totals.committed, { round: true }) + '</td>' +
+            '<td class="num">' + money(totals.planned, { round: true }) + '</td>' +
+            '<td class="num">' + money(totals.forecast, { round: true }) + '</td>' +
+            '<td class="num">' + money(totals.available, { round: true }) + '</td>' +
+            '<td></td>' +
+          '</tr></tfoot></table></div>' +
+        '</div>';
+
+      App.bind(pane, {
+        'open': function (dataset) { App.navigate('#/project/' + dataset.id + '/budget'); },
+        'export': function () {
+          App.call('reports.csv', { table: 'purchases' }).then(function (file) {
+            downloadText(file.filename, file.csv, file.mimeType);
+            Toast.ok(pluralise(file.rowCount, 'row') + ' exported.');
+          });
+        }
+      });
+    }).catch(function (err) {
+      document.getElementById('bp-body').innerHTML =
+        '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  }
+};
+</script>

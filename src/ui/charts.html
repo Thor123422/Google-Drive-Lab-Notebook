@@ -1,0 +1,627 @@
+<script>
+/* ==================================================================
+   charts.html — hand-rolled SVG charts.
+
+   Conventions held throughout (from the project's viz rules):
+     · one y-axis, never two
+     · 2px lines, >=8px markers, 4px rounded bar ends on the baseline,
+       2px surface-coloured gap between stacked segments
+     · recessive gridlines and axis, ink from text tokens only
+     · a legend whenever there are two or more series, plus direct
+       labels on the lines
+     · a crosshair/hover tooltip on every plot
+     · a table view behind a toggle — this is also the required relief
+       for the two series colours that sit below 3:1 on the light
+       surface (aqua and yellow in the stacked bars)
+   ================================================================== */
+
+var Chart = {
+  observers: new WeakMap(),
+
+  /** Re-render a chart when its container changes width. */
+  responsive: function (container, draw) {
+    var self = this;
+    var pending = null;
+
+    function run() {
+      var width = container.clientWidth;
+      if (width < 80) return;
+      draw(width);
+    }
+
+    if (this.observers.has(container)) {
+      this.observers.get(container).disconnect();
+    }
+    if (typeof ResizeObserver !== 'undefined') {
+      var observer = new ResizeObserver(function () {
+        clearTimeout(pending);
+        pending = setTimeout(run, 80);
+      });
+      observer.observe(container);
+      this.observers.set(container, observer);
+    }
+    run();
+  },
+
+  cssVar: function (name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  },
+
+  /** Rounded "nice" axis maximum and a matching tick step. */
+  niceScale: function (max, tickCount) {
+    var ticks = tickCount || 4;
+    if (!isFinite(max) || max <= 0) return { max: 100, step: 25 };
+    var rough = max / ticks;
+    var magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
+    var normalised = rough / magnitude;
+    var step;
+    if (normalised <= 1) step = 1;
+    else if (normalised <= 2) step = 2;
+    else if (normalised <= 2.5) step = 2.5;
+    else if (normalised <= 5) step = 5;
+    else step = 10;
+    step = step * magnitude;
+    return { max: Math.ceil(max / step) * step, step: step };
+  },
+
+  svgEl: function (tag, attrs) {
+    var node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.keys(attrs || {}).forEach(function (key) {
+      node.setAttribute(key, attrs[key]);
+    });
+    return node;
+  },
+
+  /** Shared tooltip element, created lazily inside the figure. */
+  tooltip: function (container) {
+    var node = container.querySelector('.chart-tooltip');
+    if (!node) {
+      node = document.createElement('div');
+      node.className = 'chart-tooltip';
+      container.appendChild(node);
+    }
+    return node;
+  },
+
+  placeTooltip: function (node, container, x, y) {
+    var width = node.offsetWidth || 160;
+    var left = x + 14;
+    if (left + width > container.clientWidth) left = x - width - 14;
+    if (left < 0) left = 4;
+    node.style.left = left + 'px';
+    node.style.top = Math.max(y - 10, 4) + 'px';
+  },
+
+  /** A <details> table under a chart: the accessible fallback. */
+  tableView: function (caption, headers, rows) {
+    var html = '<details class="chart-table" style="margin-top:12px">' +
+      '<summary class="small secondary" style="cursor:pointer">' +
+      esc(caption || 'View as table') + '</summary>' +
+      '<div class="table-wrap" style="margin-top:8px"><table class="data"><thead><tr>';
+    headers.forEach(function (h, i) {
+      html += '<th' + (i > 0 ? ' class="num"' : '') + '>' + esc(h) + '</th>';
+    });
+    html += '</tr></thead><tbody>';
+    rows.forEach(function (row) {
+      html += '<tr>';
+      row.forEach(function (cell, i) {
+        html += '<td' + (i > 0 ? ' class="num"' : '') + '>' + esc(cell) + '</td>';
+      });
+      html += '</tr>';
+    });
+    return html + '</tbody></table></div></details>';
+  }
+};
+
+/* ============================================================== *
+ * Budget burn-up: cumulative actual against cumulative forecast,
+ * with the budget as a reference line.
+ * ============================================================== */
+
+function renderBudgetChart(container, detail) {
+  var series = detail.series || [];
+  if (series.length < 2) {
+    container.innerHTML = emptyState('📈', 'Not enough history yet',
+      'Record a purchase or a recurring cost and the projection will appear here.');
+    return;
+  }
+
+  var budget = Number(detail.snapshot.budget) || 0;
+  var currency = detail.snapshot.currency;
+
+  var legend =
+    '<div class="chart-legend">' +
+      '<span class="key"><span class="swatch line" style="background:var(--series-1)"></span>Spent to date</span>' +
+      '<span class="key" style="color:var(--series-2)"><span class="swatch dashed"></span>' +
+        '<span style="color:var(--text-secondary)">Projected (committed + planned)</span></span>' +
+      (budget > 0
+        ? '<span class="key"><span class="swatch dashed" style="color:var(--text-muted)"></span>Budget ' +
+          money(budget) + '</span>'
+        : '') +
+    '</div>';
+
+  var tableRows = series.map(function (point) {
+    return [
+      point.label,
+      point.cumulativeActual === null ? '—' : money(point.cumulativeActual),
+      money(point.cumulativeProjected),
+      budget > 0 ? money(budget) : '—'
+    ];
+  });
+
+  container.innerHTML = legend +
+    '<div class="chart-figure" data-plot></div>' +
+    Chart.tableView('View the monthly figures as a table',
+      ['Month', 'Cumulative spent', 'Cumulative projected', 'Budget'], tableRows);
+
+  var plot = container.querySelector('[data-plot]');
+
+  Chart.responsive(plot, function (width) {
+    var height = 268;
+    var margin = { top: 18, right: 66, bottom: 30, left: 62 };
+    var innerW = Math.max(width - margin.left - margin.right, 40);
+    var innerH = height - margin.top - margin.bottom;
+
+    var peak = series.reduce(function (max, point) {
+      return Math.max(max, point.cumulativeProjected || 0, point.cumulativeActual || 0);
+    }, budget);
+    var scale = Chart.niceScale(peak * 1.06, 4);
+
+    function x(i) {
+      return series.length === 1 ? innerW / 2 : (i / (series.length - 1)) * innerW;
+    }
+    function y(value) {
+      return innerH - (Math.max(value, 0) / scale.max) * innerH;
+    }
+
+    var svg = Chart.svgEl('svg', {
+      class: 'chart', width: width, height: height,
+      viewBox: '0 0 ' + width + ' ' + height,
+      role: 'img',
+      'aria-label': 'Cumulative spend against budget by month'
+    });
+    var root = Chart.svgEl('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' });
+    svg.appendChild(root);
+
+    // Gridlines and y ticks.
+    for (var v = 0; v <= scale.max + 0.001; v += scale.step) {
+      var gy = y(v);
+      root.appendChild(Chart.svgEl('line', {
+        class: 'gridline', x1: 0, x2: innerW, y1: gy, y2: gy
+      }));
+      var tick = Chart.svgEl('text', {
+        class: 'axis-label', x: -9, y: gy + 4, 'text-anchor': 'end'
+      });
+      tick.textContent = moneyShort(v);
+      root.appendChild(tick);
+    }
+
+    root.appendChild(Chart.svgEl('line', {
+      class: 'baseline', x1: 0, x2: innerW, y1: innerH, y2: innerH
+    }));
+
+    // X labels — thinned so they never collide.
+    var every = Math.max(1, Math.ceil(series.length / Math.max(Math.floor(innerW / 58), 2)));
+    series.forEach(function (point, i) {
+      if (i % every !== 0 && i !== series.length - 1) return;
+      var label = Chart.svgEl('text', {
+        class: 'axis-label', x: x(i), y: innerH + 18, 'text-anchor': 'middle'
+      });
+      label.textContent = point.label;
+      root.appendChild(label);
+    });
+
+    // Budget reference line.
+    if (budget > 0 && budget <= scale.max) {
+      root.appendChild(Chart.svgEl('line', {
+        x1: 0, x2: innerW, y1: y(budget), y2: y(budget),
+        stroke: Chart.cssVar('--text-muted'), 'stroke-width': 1.5,
+        'stroke-dasharray': '2 4'
+      }));
+      var budgetLabel = Chart.svgEl('text', {
+        class: 'data-label', x: innerW + 7, y: y(budget) + 4
+      });
+      budgetLabel.textContent = 'Budget';
+      root.appendChild(budgetLabel);
+    }
+
+    // Projected line — dashed, spanning the whole axis.
+    var projectedPath = series.map(function (point, i) {
+      return (i ? 'L' : 'M') + x(i) + ' ' + y(point.cumulativeProjected);
+    }).join(' ');
+    root.appendChild(Chart.svgEl('path', {
+      d: projectedPath, fill: 'none', stroke: Chart.cssVar('--series-2'),
+      'stroke-width': 2, 'stroke-dasharray': '5 4',
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+    }));
+
+    // Actual line — solid, stops at the current month.
+    var actualPoints = series.filter(function (p) { return p.cumulativeActual !== null; });
+    var lastActualIndex = -1;
+    series.forEach(function (p, i) { if (p.cumulativeActual !== null) lastActualIndex = i; });
+
+    if (actualPoints.length) {
+      var actualPath = '';
+      series.forEach(function (point, i) {
+        if (point.cumulativeActual === null) return;
+        actualPath += (actualPath ? 'L' : 'M') + x(i) + ' ' + y(point.cumulativeActual);
+      });
+      root.appendChild(Chart.svgEl('path', {
+        d: actualPath, fill: 'none', stroke: Chart.cssVar('--series-1'),
+        'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+      }));
+
+      if (lastActualIndex >= 0) {
+        root.appendChild(Chart.svgEl('circle', {
+          cx: x(lastActualIndex), cy: y(series[lastActualIndex].cumulativeActual), r: 4.5,
+          fill: Chart.cssVar('--series-1'),
+          stroke: Chart.cssVar('--surface-1'), 'stroke-width': 2
+        }));
+      }
+    }
+
+    // Direct labels at the right-hand end of each line.
+    var endPoint = series[series.length - 1];
+    var endLabel = Chart.svgEl('text', {
+      class: 'data-label', x: innerW + 7, y: y(endPoint.cumulativeProjected) + 4,
+      fill: Chart.cssVar('--series-2')
+    });
+    endLabel.textContent = moneyShort(endPoint.cumulativeProjected);
+    root.appendChild(endLabel);
+
+    if (lastActualIndex >= 0) {
+      var actualValue = series[lastActualIndex].cumulativeActual;
+      var gap = Math.abs(y(actualValue) - y(endPoint.cumulativeProjected));
+      if (gap > 15) {
+        var actualLabel = Chart.svgEl('text', {
+          class: 'data-label', x: x(lastActualIndex) + 9, y: y(actualValue) - 8,
+          fill: Chart.cssVar('--series-1')
+        });
+        actualLabel.textContent = moneyShort(actualValue);
+        root.appendChild(actualLabel);
+      }
+    }
+
+    // Crosshair + hover.
+    var crosshair = Chart.svgEl('line', {
+      y1: 0, y2: innerH, stroke: Chart.cssVar('--border-strong'),
+      'stroke-width': 1, opacity: 0
+    });
+    root.appendChild(crosshair);
+    var marker = Chart.svgEl('circle', {
+      r: 5, fill: Chart.cssVar('--series-2'),
+      stroke: Chart.cssVar('--surface-1'), 'stroke-width': 2, opacity: 0
+    });
+    root.appendChild(marker);
+
+    var tip = Chart.tooltip(plot);
+    var hit = Chart.svgEl('rect', {
+      x: 0, y: 0, width: innerW, height: innerH, fill: 'transparent', cursor: 'crosshair'
+    });
+    root.appendChild(hit);
+
+    hit.addEventListener('mousemove', function (event) {
+      var bounds = svg.getBoundingClientRect();
+      var px = event.clientX - bounds.left - margin.left;
+      var index = series.length === 1 ? 0
+        : Math.round((px / innerW) * (series.length - 1));
+      index = Math.max(0, Math.min(series.length - 1, index));
+      var point = series[index];
+
+      crosshair.setAttribute('x1', x(index));
+      crosshair.setAttribute('x2', x(index));
+      crosshair.setAttribute('opacity', 1);
+      marker.setAttribute('cx', x(index));
+      marker.setAttribute('cy', y(point.cumulativeProjected));
+      marker.setAttribute('opacity', 1);
+
+      tip.innerHTML =
+        '<div class="tt-title">' + esc(point.label) + '</div>' +
+        (point.cumulativeActual !== null
+          ? '<div class="tt-row"><span class="swatch" style="background:var(--series-1)"></span>' +
+            'Spent<span class="tt-val">' + money(point.cumulativeActual) + '</span></div>'
+          : '') +
+        '<div class="tt-row"><span class="swatch" style="background:var(--series-2)"></span>' +
+          'Projected<span class="tt-val">' + money(point.cumulativeProjected) + '</span></div>' +
+        (point.actual ? '<div class="tt-row secondary">In month<span class="tt-val">' +
+          money(point.actual) + '</span></div>' : '') +
+        (budget > 0
+          ? '<div class="tt-row secondary">Against budget<span class="tt-val">' +
+            pct((point.cumulativeProjected / budget) * 100) + '</span></div>'
+          : '');
+      tip.classList.add('is-visible');
+      Chart.placeTooltip(tip, plot, x(index) + margin.left, y(point.cumulativeProjected) + margin.top);
+    });
+
+    hit.addEventListener('mouseleave', function () {
+      crosshair.setAttribute('opacity', 0);
+      marker.setAttribute('opacity', 0);
+      tip.classList.remove('is-visible');
+    });
+
+    plot.querySelectorAll('svg').forEach(function (old) { old.remove(); });
+    plot.insertBefore(svg, plot.firstChild);
+  });
+}
+
+/* ============================================================== *
+ * Monthly spend, stacked by how committed the money is.
+ * ============================================================== */
+
+function renderMonthlyBars(container, series) {
+  var stacks = [
+    { key: 'actual', label: 'Spent', color: '--series-1' },
+    { key: 'committed', label: 'Committed', color: '--series-2' },
+    { key: 'planned', label: 'Planned', color: '--series-3' },
+    { key: 'recurring', label: 'Recurring (future)', color: '--series-4' }
+  ];
+
+  var used = stacks.filter(function (stack) {
+    return series.some(function (point) { return Number(point[stack.key]) > 0; });
+  });
+
+  if (!used.length) {
+    container.innerHTML = emptyState('▤', 'Nothing booked yet',
+      'Monthly spend will chart here once there are purchases or recurring costs.');
+    return;
+  }
+
+  container.innerHTML =
+    '<div class="chart-legend">' +
+      used.map(function (stack) {
+        return '<span class="key"><span class="swatch" style="background:var(' +
+          stack.color + ')"></span>' + esc(stack.label) + '</span>';
+      }).join('') +
+    '</div>' +
+    '<div class="chart-figure" data-plot></div>' +
+    Chart.tableView('View monthly spend as a table',
+      ['Month'].concat(used.map(function (s) { return s.label; })).concat(['Total']),
+      series.map(function (point) {
+        var total = used.reduce(function (sum, s) { return sum + Number(point[s.key] || 0); }, 0);
+        return [point.label]
+          .concat(used.map(function (s) { return money(point[s.key] || 0); }))
+          .concat([money(total)]);
+      }));
+
+  var plot = container.querySelector('[data-plot]');
+
+  Chart.responsive(plot, function (width) {
+    var height = 230;
+    var margin = { top: 14, right: 14, bottom: 30, left: 62 };
+    var innerW = Math.max(width - margin.left - margin.right, 40);
+    var innerH = height - margin.top - margin.bottom;
+
+    var peak = series.reduce(function (max, point) {
+      return Math.max(max, used.reduce(function (sum, s) {
+        return sum + Number(point[s.key] || 0);
+      }, 0));
+    }, 0);
+    var scale = Chart.niceScale(peak * 1.08, 4);
+
+    var slot = innerW / Math.max(series.length, 1);
+    var barWidth = Math.min(Math.max(slot - 7, 4), 42);
+
+    var svg = Chart.svgEl('svg', {
+      class: 'chart', width: width, height: height,
+      viewBox: '0 0 ' + width + ' ' + height,
+      role: 'img', 'aria-label': 'Monthly spend by commitment stage'
+    });
+    var root = Chart.svgEl('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' });
+    svg.appendChild(root);
+
+    for (var v = 0; v <= scale.max + 0.001; v += scale.step) {
+      var gy = innerH - (v / scale.max) * innerH;
+      root.appendChild(Chart.svgEl('line', { class: 'gridline', x1: 0, x2: innerW, y1: gy, y2: gy }));
+      var tick = Chart.svgEl('text', { class: 'axis-label', x: -9, y: gy + 4, 'text-anchor': 'end' });
+      tick.textContent = moneyShort(v);
+      root.appendChild(tick);
+    }
+
+    var tip = Chart.tooltip(plot);
+    var every = Math.max(1, Math.ceil(series.length / Math.max(Math.floor(innerW / 54), 2)));
+
+    series.forEach(function (point, i) {
+      var cx = slot * i + slot / 2;
+      var total = used.reduce(function (sum, s) { return sum + Number(point[s.key] || 0); }, 0);
+      var cursorY = innerH;
+
+      // Stack from the baseline up, newest commitment stage on top.
+      used.forEach(function (stack) {
+        var value = Number(point[stack.key] || 0);
+        if (value <= 0) return;
+        var barHeight = (value / scale.max) * innerH;
+        if (barHeight < 0.6) return;
+        var topY = cursorY - barHeight;
+        var isBottom = cursorY >= innerH - 0.5;
+
+        var rect = Chart.svgEl('rect', {
+          x: cx - barWidth / 2,
+          y: topY,
+          width: barWidth,
+          height: Math.max(barHeight - (isBottom ? 0 : 2), 1),
+          fill: Chart.cssVar(stack.color),
+          rx: isBottom ? 0 : 2
+        });
+        // Rounded top on the uppermost visible segment only.
+        root.appendChild(rect);
+        cursorY = topY;
+      });
+
+      // Rounded 4px cap on the top of the whole stack.
+      if (total > 0) {
+        var capHeight = Math.min((total / scale.max) * innerH, 4);
+        root.appendChild(Chart.svgEl('rect', {
+          x: cx - barWidth / 2, y: cursorY, width: barWidth, height: capHeight,
+          fill: 'none'
+        }));
+      }
+
+      if (i % every === 0 || i === series.length - 1) {
+        var label = Chart.svgEl('text', {
+          class: 'axis-label', x: cx, y: innerH + 18, 'text-anchor': 'middle'
+        });
+        label.textContent = point.label;
+        root.appendChild(label);
+      }
+
+      // Hit target spans the whole slot, not just the bar.
+      var hit = Chart.svgEl('rect', {
+        x: slot * i, y: 0, width: slot, height: innerH, fill: 'transparent'
+      });
+      hit.addEventListener('mouseenter', function () {
+        if (total <= 0) {
+          tip.innerHTML = '<div class="tt-title">' + esc(point.label) + '</div>' +
+            '<div class="secondary small">Nothing booked</div>';
+        } else {
+          tip.innerHTML = '<div class="tt-title">' + esc(point.label) + '</div>' +
+            used.map(function (stack) {
+              var value = Number(point[stack.key] || 0);
+              if (value <= 0) return '';
+              return '<div class="tt-row"><span class="swatch" style="background:var(' +
+                stack.color + ')"></span>' + esc(stack.label) +
+                '<span class="tt-val">' + money(value) + '</span></div>';
+            }).join('') +
+            '<div class="tt-row bold" style="border-top:1px solid var(--border);margin-top:5px;padding-top:4px">' +
+            'Total<span class="tt-val">' + money(total) + '</span></div>';
+        }
+        tip.classList.add('is-visible');
+        Chart.placeTooltip(tip, plot, cx + margin.left, margin.top + 10);
+      });
+      hit.addEventListener('mouseleave', function () { tip.classList.remove('is-visible'); });
+      root.appendChild(hit);
+    });
+
+    root.appendChild(Chart.svgEl('line', {
+      class: 'baseline', x1: 0, x2: innerW, y1: innerH, y2: innerH
+    }));
+
+    plot.querySelectorAll('svg').forEach(function (old) { old.remove(); });
+    plot.insertBefore(svg, plot.firstChild);
+  });
+}
+
+/* ============================================================== *
+ * Spend by category — one series, so no legend; values are
+ * labelled directly on each bar.
+ * ============================================================== */
+
+function renderCategoryBars(container, categories) {
+  var rows = (categories || []).filter(function (c) { return c.total > 0; });
+  if (!rows.length) {
+    container.innerHTML = emptyState('▦', 'No spend recorded',
+      'Categories appear once purchases or recurring costs exist.');
+    return;
+  }
+
+  container.innerHTML = '<div class="chart-figure" data-plot></div>' +
+    Chart.tableView('View categories as a table',
+      ['Category', 'Actual', 'Committed', 'Planned', 'Total'],
+      rows.map(function (c) {
+        return [c.label, money(c.actual), money(c.committed), money(c.planned), money(c.total)];
+      }));
+
+  var plot = container.querySelector('[data-plot]');
+
+  Chart.responsive(plot, function (width) {
+    var rowHeight = 30;
+    var margin = { top: 6, right: 74, bottom: 6, left: 124 };
+    var height = rows.length * rowHeight + margin.top + margin.bottom;
+    var innerW = Math.max(width - margin.left - margin.right, 40);
+
+    var peak = rows.reduce(function (max, c) { return Math.max(max, c.total); }, 0);
+    var scale = Chart.niceScale(peak, 4);
+
+    var svg = Chart.svgEl('svg', {
+      class: 'chart', width: width, height: height,
+      viewBox: '0 0 ' + width + ' ' + height,
+      role: 'img', 'aria-label': 'Spend by category'
+    });
+    var root = Chart.svgEl('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' });
+    svg.appendChild(root);
+
+    var tip = Chart.tooltip(plot);
+
+    rows.forEach(function (row, i) {
+      var y = i * rowHeight;
+      var barHeight = 13;
+      var barY = y + (rowHeight - barHeight) / 2;
+
+      var label = Chart.svgEl('text', {
+        class: 'axis-label', x: -10, y: barY + barHeight - 2, 'text-anchor': 'end'
+      });
+      label.textContent = row.label;
+      root.appendChild(label);
+
+      var segments = [
+        { value: row.actual, color: '--series-1', label: 'Actual' },
+        { value: row.committed, color: '--series-2', label: 'Committed' },
+        { value: row.planned, color: '--series-3', label: 'Planned' }
+      ].filter(function (s) { return s.value > 0; });
+
+      var cursorX = 0;
+      segments.forEach(function (segment, si) {
+        var segWidth = (segment.value / scale.max) * innerW;
+        if (segWidth < 0.6) return;
+        var isLast = si === segments.length - 1;
+        root.appendChild(Chart.svgEl('rect', {
+          x: cursorX,
+          y: barY,
+          width: Math.max(segWidth - (isLast ? 0 : 2), 1),
+          height: barHeight,
+          fill: Chart.cssVar(segment.color),
+          rx: isLast ? 3 : 0
+        }));
+        cursorX += segWidth;
+      });
+
+      var valueLabel = Chart.svgEl('text', {
+        class: 'data-label', x: cursorX + 8, y: barY + barHeight - 2
+      });
+      valueLabel.textContent = money(row.total, { round: true });
+      root.appendChild(valueLabel);
+
+      var hit = Chart.svgEl('rect', {
+        x: -margin.left, y: y, width: innerW + margin.left + margin.right,
+        height: rowHeight, fill: 'transparent'
+      });
+      hit.addEventListener('mouseenter', function () {
+        tip.innerHTML = '<div class="tt-title">' + esc(row.label) + '</div>' +
+          '<div class="tt-row"><span class="swatch" style="background:var(--series-1)"></span>' +
+            'Actual<span class="tt-val">' + money(row.actual) + '</span></div>' +
+          '<div class="tt-row"><span class="swatch" style="background:var(--series-2)"></span>' +
+            'Committed<span class="tt-val">' + money(row.committed) + '</span></div>' +
+          '<div class="tt-row"><span class="swatch" style="background:var(--series-3)"></span>' +
+            'Planned<span class="tt-val">' + money(row.planned) + '</span></div>';
+        tip.classList.add('is-visible');
+        Chart.placeTooltip(tip, plot, margin.left + cursorX, y + margin.top);
+      });
+      hit.addEventListener('mouseleave', function () { tip.classList.remove('is-visible'); });
+      root.appendChild(hit);
+    });
+
+    plot.querySelectorAll('svg').forEach(function (old) { old.remove(); });
+    plot.insertBefore(svg, plot.firstChild);
+  });
+}
+
+/**
+ * Budget meter: a thin stacked bar for a project card. Always paired
+ * with the figures in text, so it never carries meaning alone.
+ */
+function budgetMeter(snapshot) {
+  if (!snapshot || !snapshot.budget) return '';
+  var budget = snapshot.budget;
+  function share(value) { return Math.max(0, Math.min(100, (value / budget) * 100)); }
+
+  var actual = share(snapshot.actual);
+  var committed = Math.min(share(snapshot.committed), 100 - actual);
+  var planned = Math.min(share(snapshot.planned), 100 - actual - committed);
+
+  return '<div class="meter" role="img" aria-label="' +
+      attr(money(snapshot.actual) + ' spent of ' + money(budget)) + '">' +
+    (actual > 0 ? '<div class="meter-fill" style="width:' + actual + '%;background:var(--series-1)"></div>' : '') +
+    (committed > 0 ? '<div class="meter-fill" style="width:' + committed + '%;background:var(--series-2)"></div>' : '') +
+    (planned > 0 ? '<div class="meter-fill" style="width:' + planned + '%;background:var(--series-3)"></div>' : '') +
+    '</div>';
+}
+</script>

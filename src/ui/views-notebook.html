@@ -1,0 +1,483 @@
+<script>
+/* ============================= Notebook ============================ */
+
+var Notebook = {
+  filters: { search: '', type: '', projectId: '' },
+
+  /* ------------------- all entries, across projects --------------- */
+
+  renderAll: function (host, route) {
+    Notebook.filters.projectId = route.query.project || '';
+
+    host.innerHTML =
+      App.pageHead('Notebook', 'Every entry, newest first.',
+        '<button class="btn btn-primary" data-action="new">✎ New entry</button>') +
+      '<div class="filters">' +
+        '<input type="search" id="n-search" placeholder="Search titles and bodies…" ' +
+          'value="' + attr(Notebook.filters.search) + '" style="min-width:240px">' +
+        '<select id="n-project"><option value="">All projects</option>' +
+          App.projects.map(function (p) {
+            return '<option value="' + attr(p.id) + '"' +
+              (Notebook.filters.projectId === p.id ? ' selected' : '') + '>' +
+              esc((p.code ? p.code + ' — ' : '') + p.name) + '</option>';
+          }).join('') +
+        '</select>' +
+        '<select id="n-type"><option value="">All types</option>' +
+          App.enums.entryType.map(function (t) {
+            return '<option value="' + attr(t) + '"' +
+              (Notebook.filters.type === t ? ' selected' : '') + '>' + esc(titleCase(t)) + '</option>';
+          }).join('') +
+        '</select>' +
+      '</div>' +
+      '<div id="n-list">' + loadingPane() + '</div>';
+
+    function reload() {
+      Notebook.filters.search = document.getElementById('n-search').value;
+      Notebook.filters.projectId = document.getElementById('n-project').value;
+      Notebook.filters.type = document.getElementById('n-type').value;
+      Notebook.loadList('n-list', Notebook.filters, true);
+    }
+
+    document.getElementById('n-search').addEventListener('input', debounce(reload, 220));
+    document.getElementById('n-project').addEventListener('change', reload);
+    document.getElementById('n-type').addEventListener('change', reload);
+
+    App.bind(host, {
+      'new': function () { Notebook.openEditor(null, Notebook.filters.projectId); }
+    });
+    Notebook.loadList('n-list', Notebook.filters, true);
+  },
+
+  /* ------------------ notebook tab inside a project --------------- */
+
+  renderTab: function (body, project, route) {
+    body.innerHTML =
+      '<div class="filters">' +
+        '<input type="search" id="nt-search" placeholder="Search this project’s entries…" ' +
+          'style="min-width:240px">' +
+        '<select id="nt-type"><option value="">All types</option>' +
+          App.enums.entryType.map(function (t) {
+            return '<option value="' + attr(t) + '">' + esc(titleCase(t)) + '</option>';
+          }).join('') +
+        '</select>' +
+        '<div class="spacer"></div>' +
+        '<button class="btn btn-primary" data-action="new">✎ New entry</button>' +
+      '</div>' +
+      '<div id="nt-list">' + loadingPane() + '</div>';
+
+    function reload() {
+      Notebook.loadList('nt-list', {
+        projectId: project.id,
+        search: document.getElementById('nt-search').value,
+        type: document.getElementById('nt-type').value
+      }, false);
+    }
+
+    document.getElementById('nt-search').addEventListener('input', debounce(reload, 220));
+    document.getElementById('nt-type').addEventListener('change', reload);
+    App.bind(body, { 'new': function () { Notebook.openEditor(null, project.id); } });
+
+    reload();
+    if (route.query.entry) {
+      setTimeout(function () { Notebook.openViewer(route.query.entry); }, 120);
+    }
+  },
+
+  /* ----------------------------- list ----------------------------- */
+
+  loadList: function (paneId, filters, showProject) {
+    var pane = document.getElementById(paneId);
+    if (!pane) return;
+
+    App.rpc('entries.list', filters).then(function (entries) {
+      if (!pane.isConnected) return;
+      if (!entries.length) {
+        pane.innerHTML = emptyState('✎', 'No entries yet',
+          'A notebook entry records what you did, what you observed and what you ' +
+          'concluded — and links to the files and parts involved.',
+          '<button class="btn btn-primary" data-action="new">Write the first entry</button>');
+        App.bind(pane, {
+          'new': function () { Notebook.openEditor(null, filters.projectId || ''); }
+        });
+        return;
+      }
+
+      pane.innerHTML = '<div class="stack">' + entries.map(function (entry) {
+        return '<div class="card card-pad entry-card' + (entry.locked ? ' is-signed' : '') +
+          '" data-action="open" data-id="' + attr(entry.id) + '" style="cursor:pointer">' +
+          '<div class="row row-wrap" style="margin-bottom:5px">' +
+            '<span class="mono muted">#' + entry.entryNo + '</span>' +
+            '<span class="badge">' + esc(titleCase(entry.type)) + '</span>' +
+            (entry.locked
+              ? '<span class="badge is-good">✓ Signed</span>'
+              : '<span class="badge">Draft</span>') +
+            (showProject && entry.projectCode
+              ? '<span class="badge is-accent">' + esc(entry.projectCode) + '</span>' : '') +
+            '<div class="spacer"></div>' +
+            '<span class="small muted nowrap">' + fmtDate(entry.date) + '</span>' +
+          '</div>' +
+          '<h2 style="margin-bottom:5px">' + esc(entry.title) + '</h2>' +
+          (entry.body
+            ? '<p class="small secondary" style="margin-bottom:6px">' +
+              esc(entry.body.replace(/[#*`>\-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 190)) +
+              (entry.body.length > 190 ? '…' : '') + '</p>'
+            : '') +
+          '<div class="row row-wrap small muted" style="gap:10px">' +
+            (entry.linkCount ? '<span>🔗 ' + pluralise(entry.linkCount, 'reference') + '</span>' : '') +
+            (entry.tags.length ? '<span>' + tagList(entry.tags) + '</span>' : '') +
+          '</div>' +
+          '</div>';
+      }).join('') + '</div>';
+
+      App.bind(pane, {
+        'open': function (dataset) { Notebook.openViewer(dataset.id); }
+      });
+    }).catch(function (err) {
+      pane.innerHTML = '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  /* ---------------------------- viewer ---------------------------- */
+
+  openViewer: function (entryId) {
+    App.rpc('entries.get', { id: entryId }).then(function (entry) {
+      Modal.open({
+        title: '#' + entry.entryNo + '  ' + entry.title,
+        wide: true,
+        body: Notebook.viewerBody(entry),
+        footer:
+          (entry.locked
+            ? '<button class="btn" data-action="unsign">Unlock</button>'
+            : '<button class="btn" data-action="sign">✓ Sign &amp; lock</button>' +
+              '<button class="btn" data-action="edit">Edit</button>') +
+          '<div class="spacer"></div>' +
+          (entry.locked ? '' : '<button class="btn btn-danger" data-action="delete">Delete</button>') +
+          '<button class="btn" data-modal-cancel>Close</button>',
+        onMount: function (scope, handle) {
+          Notebook.wireViewer(scope, handle, entry);
+        }
+      });
+    }).catch(function (err) { Toast.err(err.message); });
+  },
+
+  viewerBody: function (entry) {
+    return '<div class="row row-wrap small secondary" style="margin-bottom:12px;gap:8px">' +
+        '<span class="badge">' + esc(titleCase(entry.type)) + '</span>' +
+        '<span>' + fmtDate(entry.date) + '</span>' +
+        (entry.projectCode ? '<span class="badge is-accent">' + esc(entry.projectCode) + '</span>' : '') +
+        (entry.locked
+          ? '<span class="badge is-good">✓ Signed by ' + esc(entry.signedBy || 'you') +
+            ' on ' + fmtDateTime(entry.signedAt) + '</span>'
+          : '<span class="badge">Draft</span>') +
+        (entry.tags.length ? '<span>' + tagList(entry.tags) + '</span>' : '') +
+      '</div>' +
+      '<div class="prose">' + markdown(entry.body) + '</div>' +
+      '<div class="divider"></div>' +
+      '<div class="row" style="margin-bottom:8px">' +
+        '<h3>References</h3><div class="spacer"></div>' +
+        (entry.locked ? '' : '<button class="btn btn-sm" data-action="add-link">+ Add reference</button>') +
+      '</div>' +
+      '<div id="entry-links">' + Notebook.linksHtml(entry.links, entry.locked) + '</div>';
+  },
+
+  linksHtml: function (links, locked) {
+    if (!links || !links.length) {
+      return '<p class="small muted">Nothing linked yet. References tie an entry to the ' +
+        'schematic, board files, parts or purchase it concerns.</p>';
+    }
+    var icons = {
+      file: '⎙', item: '⬚', entry: '✎', bom: '▤', purchase: '⇄', url: '↗'
+    };
+    return '<div class="row row-wrap" style="gap:7px">' + links.map(function (link) {
+      var href = safeUrl(link.url);
+      var inner = '<span class="chip-icon" aria-hidden="true">' +
+          (icons[link.targetType] || '•') + '</span>' +
+        '<span class="chip-text">' + esc(link.title) +
+          (link.subtitle ? ' <span class="muted">· ' + esc(link.subtitle) + '</span>' : '') +
+        '</span>';
+      return '<span class="link-chip' + (link.missing ? ' is-missing' : '') + '">' +
+        (href
+          ? '<a href="' + href + '" target="_blank" rel="noopener" ' +
+            'style="display:flex;align-items:center;gap:6px;min-width:0;color:inherit">' + inner + '</a>'
+          : inner) +
+        (locked ? '' : '<button class="chip-x" data-action="rm-link" data-id="' +
+          attr(link.id) + '" aria-label="Remove reference">×</button>') +
+        '</span>';
+    }).join('') + '</div>';
+  },
+
+  wireViewer: function (scope, handle, entry) {
+    function refresh() {
+      App.rpc('entries.get', { id: entry.id }).then(function (fresh) {
+        var pane = scope.querySelector('#entry-links');
+        if (pane) {
+          pane.innerHTML = Notebook.linksHtml(fresh.links, fresh.locked);
+          App.bind(pane, handlers);
+        }
+      });
+    }
+
+    var handlers = {
+      'add-link': function () {
+        Notebook.openLinkPicker(entry.projectId, function (link) {
+          return App.call('entries.addLink', Object.assign({ entryId: entry.id }, link))
+            .then(function () { Toast.ok('Reference added.'); refresh(); });
+        });
+      },
+      'rm-link': function (dataset) {
+        App.call('entries.removeLink', { id: dataset.id }).then(function () {
+          Toast.ok('Reference removed.');
+          refresh();
+        });
+      },
+      'edit': function () { handle.close(); Notebook.openEditor(entry, entry.projectId); },
+      'sign': function () {
+        Modal.confirm({
+          title: 'Sign and lock this entry?',
+          message: 'Signing records who finalised the entry and when. The entry becomes ' +
+            'read-only; you can still unlock it later, and the unlock is written to the audit log.',
+          submitLabel: 'Sign and lock',
+          danger: false
+        }).then(function (confirmed) {
+          if (!confirmed) return;
+          App.call('entries.sign', { id: entry.id }).then(function () {
+            Toast.ok('Entry signed.');
+            handle.close();
+            App.reload();
+          });
+        });
+      },
+      'unsign': function () {
+        Modal.open({
+          title: 'Unlock this entry',
+          body: '<p class="secondary small">Reopening a signed record is logged. ' +
+            'Say why, so the trail makes sense later.</p>' +
+            fieldTextarea('reason', 'Reason', '', {
+              rows: 3, placeholder: 'Correcting a transcription error in the measured values.'
+            }),
+          submitLabel: 'Unlock',
+          onSubmit: function (values) {
+            if (!String(values.reason || '').trim()) {
+              Toast.err('A reason is required.');
+              return false;
+            }
+            return App.call('entries.unsign', { id: entry.id, reason: values.reason })
+              .then(function () {
+                Toast.ok('Entry unlocked.');
+                handle.close();
+                App.reload();
+              });
+          }
+        });
+      },
+      'delete': function () {
+        Modal.confirm({
+          title: 'Delete entry #' + entry.entryNo + '?',
+          message: 'This removes the entry and its references. It cannot be undone.',
+          detail: 'The files and parts it pointed at are not deleted.',
+          submitLabel: 'Delete entry'
+        }).then(function (confirmed) {
+          if (!confirmed) return;
+          App.call('entries.delete', { id: entry.id }).then(function () {
+            Toast.ok('Entry deleted.');
+            handle.close();
+            App.reload();
+          });
+        });
+      }
+    };
+
+    App.bind(scope, handlers);
+  },
+
+  /* ---------------------------- editor ---------------------------- */
+
+  openEditor: function (entry, projectId) {
+    var isNew = !entry;
+
+    if (isNew && !App.projects.length) {
+      Toast.err('Create a project first — entries live inside one.');
+      return;
+    }
+
+    var e = entry || {
+      projectId: projectId || (App.projects[0] && App.projects[0].id) || '',
+      date: new Date().toISOString().slice(0, 10),
+      title: '', type: 'experiment', body: '', tags: []
+    };
+
+    var pendingLinks = [];
+
+    Modal.open({
+      title: isNew ? 'New notebook entry' : 'Edit entry #' + entry.entryNo,
+      wide: true,
+      submitLabel: isNew ? 'Create entry' : 'Save changes',
+      body:
+        fieldRow(
+          fieldProject('projectId', 'Project', e.projectId, { blank: undefined }),
+          fieldDate('date', 'Date', e.date)
+        ) +
+        fieldRow(
+          fieldText('title', 'Title', e.title, {
+            required: true, placeholder: 'Rev B first power-up'
+          }),
+          fieldSelect('type', 'Type', e.type, App.enums.entryType)
+        ) +
+        fieldTextarea('body', 'Entry', e.body, {
+          rows: 14, mono: true,
+          placeholder: '## Setup\n\nWhat you did, with the settings that matter.\n\n' +
+            '## Observations\n\n- What you measured\n\n## Conclusion\n\nWhat it means and what is next.',
+          hint: 'Markdown: ## headings, - bullets, **bold**, `code`, [links](https://…).'
+        }) +
+        '<div style="margin:12px 0">' +
+          fieldText('tags', 'Tags', (e.tags || []).join(', '), {
+            placeholder: 'power-up, rev-b', hint: 'Comma separated.'
+          }) +
+        '</div>' +
+        (isNew
+          ? '<div class="divider"></div>' +
+            '<div class="row" style="margin-bottom:8px"><h3>References</h3>' +
+              '<div class="spacer"></div>' +
+              '<button class="btn btn-sm" data-action="add-pending">+ Add reference</button></div>' +
+            '<div id="pending-links"><p class="small muted">Link the schematic, board files ' +
+              'or parts this entry concerns. You can also add them after saving.</p></div>'
+          : ''),
+      onMount: function (scope) {
+        if (!isNew) return;
+
+        function paintPending() {
+          var pane = scope.querySelector('#pending-links');
+          pane.innerHTML = pendingLinks.length
+            ? '<div class="row row-wrap" style="gap:7px">' + pendingLinks.map(function (link, i) {
+                return '<span class="link-chip"><span class="chip-text">' +
+                  esc(link.label || link.targetId) + '</span>' +
+                  '<button class="chip-x" data-action="rm-pending" data-index="' + i +
+                  '" aria-label="Remove">×</button></span>';
+              }).join('') + '</div>'
+            : '<p class="small muted">Nothing linked yet.</p>';
+          App.bind(pane, {
+            'rm-pending': function (dataset) {
+              pendingLinks.splice(Number(dataset.index), 1);
+              paintPending();
+            }
+          });
+        }
+
+        App.bind(scope, {
+          'add-pending': function () {
+            var select = scope.querySelector('[data-field="projectId"]');
+            Notebook.openLinkPicker(select ? select.value : e.projectId, function (link) {
+              pendingLinks.push(link);
+              paintPending();
+              return Promise.resolve();
+            });
+          }
+        });
+      },
+      onSubmit: function (values) {
+        if (isNew) {
+          values.links = pendingLinks;
+          return App.call('entries.create', values).then(function () {
+            Toast.ok('Entry created.');
+            App.reload();
+          });
+        }
+        values.id = entry.id;
+        return App.call('entries.update', values).then(function () {
+          Toast.ok('Entry saved.');
+          App.reload();
+        });
+      }
+    });
+  },
+
+  /* -------------------------- link picker -------------------------- */
+
+  /**
+   * Pick something to reference. `onPick` receives
+   * { targetType, targetId, label, note } and may return a promise.
+   */
+  openLinkPicker: function (projectId, onPick) {
+    Modal.open({
+      title: 'Add a reference',
+      body: '<div id="picker-body">' + loadingPane('Gathering things to link…') + '</div>',
+      footer: '<button class="btn" data-modal-cancel>Close</button>',
+      onMount: function (scope, handle) {
+        App.rpc('entries.linkTargets', { projectId: projectId }).then(function (groups) {
+          var pane = scope.querySelector('#picker-body');
+
+          pane.innerHTML =
+            '<div class="field" style="margin-bottom:12px">' +
+              '<label for="picker-filter">Filter</label>' +
+              '<input type="search" id="picker-filter" placeholder="Type to narrow the list…">' +
+            '</div>' +
+            '<div id="picker-list" style="max-height:330px;overflow-y:auto;' +
+              'border:1px solid var(--border);border-radius:var(--radius)">' +
+              (groups.length
+                ? groups.map(function (group) {
+                    return '<div class="result-group" data-group>' +
+                      '<div class="result-group-label">' + esc(group.label) + '</div>' +
+                      group.options.map(function (option) {
+                        return '<div class="result-row" data-action="pick" ' +
+                          'data-type="' + attr(option.targetType) + '" ' +
+                          'data-id="' + attr(option.targetId) + '" ' +
+                          'data-label="' + attr(option.title) + '" ' +
+                          'data-search="' + attr((option.title + ' ' + option.subtitle).toLowerCase()) + '">' +
+                          '<span class="r-title">' + esc(option.title) + '</span>' +
+                          '<span class="r-sub">' + esc(option.subtitle) + '</span></div>';
+                      }).join('') + '</div>';
+                  }).join('')
+                : '<div class="result-row"><span class="r-title muted">' +
+                  'Nothing to link yet — upload a file or add a BOM first.</span></div>') +
+            '</div>' +
+            '<div class="divider"></div>' +
+            '<div class="field"><label for="picker-url">…or link an external URL</label>' +
+              '<div class="row">' +
+                '<input type="url" id="picker-url" placeholder="https://…">' +
+                '<button class="btn" data-action="pick-url">Add</button>' +
+              '</div>' +
+            '</div>';
+
+          var filter = pane.querySelector('#picker-filter');
+          filter.addEventListener('input', function () {
+            var needle = filter.value.trim().toLowerCase();
+            pane.querySelectorAll('.result-row[data-search]').forEach(function (row) {
+              row.style.display = !needle || row.dataset.search.indexOf(needle) !== -1 ? '' : 'none';
+            });
+            pane.querySelectorAll('[data-group]').forEach(function (group) {
+              var anyVisible = Array.prototype.some.call(
+                group.querySelectorAll('.result-row'),
+                function (row) { return row.style.display !== 'none'; }
+              );
+              group.style.display = anyVisible ? '' : 'none';
+            });
+          });
+
+          App.bind(pane, {
+            'pick': function (dataset) {
+              var result = onPick({
+                targetType: dataset.type, targetId: dataset.id, label: dataset.label
+              });
+              if (result && result.then) result.then(function () { handle.close(); });
+              else handle.close();
+            },
+            'pick-url': function () {
+              var url = pane.querySelector('#picker-url').value.trim();
+              if (!/^https?:\/\//i.test(url)) {
+                Toast.err('Enter a URL starting with http:// or https://');
+                return;
+              }
+              var result = onPick({ targetType: 'url', targetId: url, label: url });
+              if (result && result.then) result.then(function () { handle.close(); });
+              else handle.close();
+            }
+          });
+        }).catch(function (err) {
+          scope.querySelector('#picker-body').innerHTML =
+            '<div class="alert is-critical">' + esc(err.message) + '</div>';
+        });
+      }
+    });
+  }
+};
+</script>

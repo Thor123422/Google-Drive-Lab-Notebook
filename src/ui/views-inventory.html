@@ -1,0 +1,416 @@
+<script>
+/* ============================ Inventory ============================ */
+
+var Inventory = {
+  filters: { search: '', category: '', lowStockOnly: false, includeInactive: false, sort: 'name' },
+
+  renderList: function (host) {
+    host.innerHTML =
+      App.pageHead('Inventory', 'Parts catalogue and stock on hand.',
+        '<button class="btn" data-action="movements">Movements</button>' +
+        '<button class="btn btn-primary" data-action="new">+ New part</button>') +
+      '<div id="inv-totals" class="grid grid-4" style="margin-bottom:16px"></div>' +
+      '<div class="filters">' +
+        '<input type="search" id="i-search" placeholder="Search name, SKU, MPN, supplier, location…" ' +
+          'value="' + attr(Inventory.filters.search) + '" style="min-width:280px">' +
+        '<select id="i-sort">' +
+          '<option value="name">Sort: name</option>' +
+          '<option value="sku">Sort: SKU</option>' +
+          '<option value="onHand">Sort: lowest stock</option>' +
+          '<option value="value">Sort: highest value</option>' +
+        '</select>' +
+        '<label class="checkline"><input type="checkbox" id="i-low"' +
+          (Inventory.filters.lowStockOnly ? ' checked' : '') + '> Low stock only</label>' +
+        '<label class="checkline"><input type="checkbox" id="i-inactive"> Include inactive</label>' +
+      '</div>' +
+      '<div class="card"><div id="i-list">' + loadingPane() + '</div></div>';
+
+    function reload() {
+      Inventory.filters.search = document.getElementById('i-search').value;
+      Inventory.filters.sort = document.getElementById('i-sort').value;
+      Inventory.filters.lowStockOnly = document.getElementById('i-low').checked;
+      Inventory.filters.includeInactive = document.getElementById('i-inactive').checked;
+      Inventory.loadList();
+    }
+
+    document.getElementById('i-search').addEventListener('input', debounce(reload, 220));
+    document.getElementById('i-sort').addEventListener('change', reload);
+    document.getElementById('i-low').addEventListener('change', reload);
+    document.getElementById('i-inactive').addEventListener('change', reload);
+
+    App.bind(host, {
+      'new': function () { Inventory.openEditor(null); },
+      'movements': function () { Inventory.openMovements(); }
+    });
+
+    App.rpc('items.totals').then(function (totals) {
+      var pane = document.getElementById('inv-totals');
+      if (!pane) return;
+      pane.innerHTML =
+        App.statTile('Parts tracked', String(totals.itemCount), 'Active catalogue entries') +
+        App.statTile('Stock value', money(totals.totalValue, { round: true }),
+          'At catalogue unit cost') +
+        App.statTile('Low stock', String(totals.lowStockCount),
+          totals.lowStockCount ? severityBadge('warning', 'At or below reorder point') : 'All above reorder point') +
+        App.statTile('Out of stock', String(totals.outOfStockCount),
+          totals.outOfStockCount ? severityBadge('serious', 'Nothing on hand') : 'None');
+    });
+
+    Inventory.loadList();
+  },
+
+  loadList: function () {
+    var pane = document.getElementById('i-list');
+    if (!pane) return;
+
+    App.rpc('items.list', Inventory.filters).then(function (items) {
+      if (!pane.isConnected) return;
+      if (!items.length) {
+        pane.innerHTML = emptyState('⬚', 'No parts match',
+          Inventory.filters.search || Inventory.filters.lowStockOnly
+            ? 'Try clearing the filters.'
+            : 'Add the parts you keep on the shelf, then draw them down against projects.',
+          '<button class="btn btn-primary" data-action="new">+ New part</button>');
+        App.bind(pane, { 'new': function () { Inventory.openEditor(null); } });
+        return;
+      }
+
+      pane.innerHTML = '<div class="table-wrap"><table class="data"><thead><tr>' +
+          '<th>Part</th><th>Location</th><th class="num">On hand</th>' +
+          '<th class="num">Reorder at</th><th class="num">Unit cost</th>' +
+          '<th class="num">Value</th><th>Status</th><th></th>' +
+        '</tr></thead><tbody>' +
+        items.map(function (item) {
+          var state = item.outOfStock
+            ? severityBadge('serious', 'Out of stock')
+            : (item.lowStock ? severityBadge('warning', 'Low') : severityBadge('good', 'OK'));
+          return '<tr class="clickable" data-action="open" data-id="' + attr(item.id) + '">' +
+            '<td><div class="bold">' + esc(item.name) + '</div>' +
+              '<div class="small muted">' +
+                [item.sku, item.mpn, item.manufacturer].filter(Boolean).map(esc).join(' · ') +
+              '</div></td>' +
+            '<td class="small">' + (item.location ? esc(item.location) : '<span class="muted">—</span>') + '</td>' +
+            '<td class="num bold">' + qty(item.onHand, item.unit) + '</td>' +
+            '<td class="num muted">' + (item.reorderPoint > 0 ? qty(item.reorderPoint) : '—') + '</td>' +
+            '<td class="num">' + money(item.unitCost) + '</td>' +
+            '<td class="num">' + money(item.value) + '</td>' +
+            '<td>' + state + (item.active ? '' : ' <span class="badge">Inactive</span>') + '</td>' +
+            '<td class="right nowrap">' +
+              '<button class="btn btn-sm" data-action="move" data-id="' + attr(item.id) + '">Move stock</button>' +
+            '</td></tr>';
+        }).join('') +
+        '</tbody></table></div>';
+
+      App.bind(pane, {
+        'open': function (dataset) { App.navigate('#/item/' + dataset.id); },
+        'move': function (dataset) { Inventory.openMovement(dataset.id); },
+        'new': function () { Inventory.openEditor(null); }
+      });
+    }).catch(function (err) {
+      pane.innerHTML = '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  /* ---------------------------- detail ---------------------------- */
+
+  renderDetail: function (host, route) {
+    App.rpc('items.get', { id: route.id }).then(function (item) {
+      var state = item.outOfStock
+        ? severityBadge('serious', 'Out of stock')
+        : (item.lowStock ? severityBadge('warning', 'Low stock') : severityBadge('good', 'In stock'));
+
+      host.innerHTML =
+        '<div class="row small" style="margin-bottom:10px">' +
+          '<a href="#/inventory" class="muted">← Inventory</a></div>' +
+        App.pageHead(item.name,
+          [item.sku, item.mpn, item.manufacturer].filter(Boolean).map(esc).join(' · ') || '&nbsp;',
+          '<button class="btn" data-action="count">Stock count</button>' +
+          '<button class="btn" data-action="move">Move stock</button>' +
+          '<button class="btn" data-action="edit">Edit</button>') +
+
+        '<div class="grid grid-4" style="margin-bottom:16px">' +
+          App.statTile('On hand', qty(item.onHand, item.unit), state) +
+          App.statTile('Stock value', money(item.value), 'At ' + money(item.unitCost) + ' each') +
+          App.statTile('On order', qty(item.onOrder, item.unit),
+            item.onOrder > 0 ? 'Planned or ordered' : 'Nothing inbound') +
+          App.statTile('Reorder point', item.reorderPoint > 0 ? qty(item.reorderPoint, item.unit) : '—',
+            item.reorderQty > 0 ? 'Reorder ' + qty(item.reorderQty, item.unit) : 'No reorder qty set') +
+        '</div>' +
+
+        '<div class="grid grid-2" style="align-items:start">' +
+          '<div class="stack">' +
+            '<div class="card"><div class="card-head"><h2>Details</h2></div>' +
+              '<div class="card-pad"><dl class="kv">' +
+                '<dt>SKU</dt><dd class="mono">' + (item.sku ? esc(item.sku) : '—') + '</dd>' +
+                '<dt>Manufacturer</dt><dd>' + (item.manufacturer ? esc(item.manufacturer) : '—') + '</dd>' +
+                '<dt>MPN</dt><dd class="mono">' + (item.mpn ? esc(item.mpn) : '—') + '</dd>' +
+                '<dt>Supplier</dt><dd>' + (item.supplier ? esc(item.supplier) : '—') +
+                  (safeUrl(item.supplierUrl)
+                    ? ' <a href="' + safeUrl(item.supplierUrl) + '" target="_blank" rel="noopener">↗</a>'
+                    : '') + '</dd>' +
+                '<dt>Supplier P/N</dt><dd class="mono">' + (item.supplierPn ? esc(item.supplierPn) : '—') + '</dd>' +
+                '<dt>Location</dt><dd>' + (item.location ? esc(item.location) : '—') + '</dd>' +
+                '<dt>Lead time</dt><dd>' + (item.leadTimeDays > 0
+                  ? pluralise(item.leadTimeDays, 'day') : '—') + '</dd>' +
+                '<dt>Category</dt><dd>' + (item.category ? esc(item.category) : '—') + '</dd>' +
+                '<dt>Tags</dt><dd>' + (item.tags.length ? tagList(item.tags) : '—') + '</dd>' +
+              '</dl>' +
+              (item.description ? '<div class="divider"></div><p class="small">' +
+                esc(item.description) + '</p>' : '') +
+              (item.notes ? '<div class="divider"></div><div class="prose small">' +
+                markdown(item.notes) + '</div>' : '') +
+              '</div></div>' +
+
+            (item.usedInBoms.length
+              ? '<div class="card"><div class="card-head"><h2>Used in BOMs</h2></div>' +
+                '<div class="table-wrap"><table class="data"><thead><tr>' +
+                  '<th>BOM</th><th>Project</th><th class="num">Per unit</th>' +
+                  '<th class="num">For build</th></tr></thead><tbody>' +
+                item.usedInBoms.map(function (row) {
+                  return '<tr class="clickable" data-action="go-bom" ' +
+                    'data-project="' + attr(row.projectId) + '" data-id="' + attr(row.bomId) + '">' +
+                    '<td>' + esc(row.name) + ' <span class="muted">rev ' + esc(row.revision) + '</span></td>' +
+                    '<td class="small">' + esc(row.projectCode) + '</td>' +
+                    '<td class="num">' + qty(row.qtyPer) + '</td>' +
+                    '<td class="num">' + qty(row.qtyPer * row.buildQty) + '</td></tr>';
+                }).join('') + '</tbody></table></div></div>'
+              : '') +
+
+            (item.usage.length
+              ? '<div class="card"><div class="card-head"><h2>Consumed by project</h2></div>' +
+                '<div class="table-wrap"><table class="data"><thead><tr>' +
+                  '<th>Project</th><th class="num">Quantity</th></tr></thead><tbody>' +
+                item.usage.map(function (row) {
+                  return '<tr><td>' + esc(row.code) + ' <span class="muted small">' +
+                    esc(row.name) + '</span></td>' +
+                    '<td class="num">' + qty(row.quantity, item.unit) + '</td></tr>';
+                }).join('') + '</tbody></table></div></div>'
+              : '') +
+          '</div>' +
+
+          '<div class="card"><div class="card-head"><h2>Stock movements</h2>' +
+            '<div class="spacer"></div><span class="badge">' + item.txnCount + '</span></div>' +
+            (item.transactions.length
+              ? '<div class="table-wrap" style="max-height:540px;overflow-y:auto">' +
+                '<table class="data"><thead><tr><th>Date</th><th>Type</th>' +
+                '<th class="num">Qty</th><th>Reference</th><th></th></tr></thead><tbody>' +
+                item.transactions.map(function (txn) {
+                  var positive = txn.quantity > 0;
+                  return '<tr><td class="nowrap small">' + fmtDate(txn.date) + '</td>' +
+                    '<td>' + badge(txn.type) + '</td>' +
+                    '<td class="num bold" style="color:' +
+                      (positive ? 'var(--success-text)' : 'var(--text-primary)') + '">' +
+                      (positive ? '+' : '') + qty(txn.quantity) + '</td>' +
+                    '<td class="small">' +
+                      (txn.projectCode ? '<span class="badge is-accent">' + esc(txn.projectCode) + '</span> ' : '') +
+                      esc(txn.note || '') + '</td>' +
+                    '<td class="right">' +
+                      (txn.purchaseId ? '<span class="tiny muted">PO</span>' :
+                        '<button class="btn btn-sm btn-ghost" data-action="rm-txn" data-id="' +
+                        attr(txn.id) + '" aria-label="Reverse">×</button>') +
+                    '</td></tr>';
+                }).join('') + '</tbody></table></div>'
+              : '<div class="card-pad small muted">No movements recorded.</div>') +
+          '</div>' +
+        '</div>';
+
+      App.bind(host, {
+        'edit': function () { Inventory.openEditor(item); },
+        'move': function () { Inventory.openMovement(item.id); },
+        'count': function () { Inventory.openCount(item); },
+        'go-bom': function (dataset) {
+          App.navigate('#/project/' + dataset.project + '/boms?bom=' + dataset.id);
+        },
+        'rm-txn': function (dataset) {
+          Modal.confirm({
+            title: 'Reverse this movement?',
+            message: 'The movement is deleted and the stock figure recalculated.',
+            submitLabel: 'Reverse'
+          }).then(function (confirmed) {
+            if (!confirmed) return;
+            App.call('items.deleteTxn', { id: dataset.id }).then(function () {
+              Toast.ok('Movement reversed.');
+              App.reload();
+            });
+          });
+        }
+      });
+    }).catch(function (err) {
+      host.innerHTML = emptyState('⚠', 'Part not available', err.message,
+        '<a class="btn btn-primary" href="#/inventory">Back to inventory</a>');
+    });
+  },
+
+  /* ---------------------------- editor ---------------------------- */
+
+  openEditor: function (item) {
+    var isNew = !item;
+    var i = item || {
+      sku: '', name: '', description: '', category: '', manufacturer: '', mpn: '',
+      supplier: '', supplierPn: '', supplierUrl: '', unit: 'ea', unitCost: 0,
+      reorderPoint: 0, reorderQty: 0, leadTimeDays: 0, location: '', tags: [],
+      active: true, notes: ''
+    };
+
+    Modal.open({
+      title: isNew ? 'New part' : 'Edit part',
+      wide: true,
+      submitLabel: isNew ? 'Create part' : 'Save changes',
+      body:
+        fieldRow(
+          fieldText('name', 'Name', i.name, { required: true, placeholder: '10 µH 5 A shielded inductor' }),
+          fieldText('sku', 'SKU', i.sku, { placeholder: 'IND-10UH-5A', hint: 'Your own code. Must be unique.' })
+        ) +
+        fieldRow(
+          fieldText('manufacturer', 'Manufacturer', i.manufacturer),
+          fieldText('mpn', 'Manufacturer part number', i.mpn)
+        ) +
+        fieldRow(
+          fieldText('supplier', 'Supplier', i.supplier, { placeholder: 'Digi-Key' }),
+          fieldText('supplierPn', 'Supplier part number', i.supplierPn)
+        ) +
+        fieldRow(
+          fieldText('supplierUrl', 'Supplier URL', i.supplierUrl, { type: 'url' }),
+          fieldText('category', 'Category', i.category, { placeholder: 'Passives' })
+        ) +
+        fieldRow(
+          fieldText('unit', 'Unit', i.unit, { placeholder: 'ea, m, kg, roll' }),
+          fieldNumber('unitCost', 'Unit cost', i.unitCost, { min: 0 })
+        ) +
+        fieldRow(
+          fieldNumber('reorderPoint', 'Reorder point', i.reorderPoint, {
+            min: 0, hint: 'Flag as low when stock reaches this.'
+          }),
+          fieldNumber('reorderQty', 'Reorder quantity', i.reorderQty, { min: 0 })
+        ) +
+        fieldRow(
+          fieldNumber('leadTimeDays', 'Lead time (days)', i.leadTimeDays, { min: 0 }),
+          fieldText('location', 'Location', i.location, { placeholder: 'Bin B1' })
+        ) +
+        (isNew
+          ? fieldRow(
+              fieldNumber('openingQty', 'Opening stock', 0, {
+                min: 0, hint: 'Recorded as a receipt so the ledger stays complete.'
+              }),
+              fieldText('tags', 'Tags', '', { placeholder: 'smd, rohs' })
+            )
+          : fieldRow(
+              fieldText('tags', 'Tags', (i.tags || []).join(', ')),
+              fieldSelect('active', 'Active', i.active ? 'true' : 'false', [
+                { value: 'true', label: 'Active' }, { value: 'false', label: 'Inactive' }
+              ])
+            )) +
+        fieldTextarea('notes', 'Notes', i.notes, { rows: 3 }),
+      onSubmit: function (values) {
+        if (!isNew) {
+          values.id = item.id;
+          values.active = values.active === 'true' || values.active === true;
+        }
+        return App.call(isNew ? 'items.create' : 'items.update', values).then(function (saved) {
+          Toast.ok(isNew ? 'Part added.' : 'Part saved.');
+          if (isNew) App.navigate('#/item/' + saved.id);
+          else App.reload();
+        });
+      }
+    });
+  },
+
+  /* --------------------------- movements --------------------------- */
+
+  openMovement: function (itemId) {
+    App.rpc('items.list', { includeInactive: true }).then(function (items) {
+      if (!items.length) { Toast.err('Add a part first.'); return; }
+
+      Modal.open({
+        title: 'Record a stock movement',
+        submitLabel: 'Record movement',
+        body:
+          fieldSelect('itemId', 'Part', itemId || items[0].id,
+            items.map(function (i) {
+              return {
+                value: i.id,
+                label: i.name + (i.sku ? ' (' + i.sku + ')' : '') +
+                  ' — ' + i.onHand + ' ' + i.unit + ' on hand'
+              };
+            })) +
+          '<div style="height:12px"></div>' +
+          fieldRow(
+            fieldSelect('type', 'Movement', 'consume', [
+              { value: 'receive', label: 'Receive — stock in' },
+              { value: 'consume', label: 'Consume — used on a project' },
+              { value: 'return', label: 'Return — put back on the shelf' },
+              { value: 'scrap', label: 'Scrap — damaged or discarded' },
+              { value: 'adjust', label: 'Adjust — correction' }
+            ], { hint: 'The sign is applied for you.' }),
+            fieldNumber('quantity', 'Quantity', 1, { min: 0 })
+          ) +
+          fieldRow(
+            fieldDate('date', 'Date', new Date().toISOString().slice(0, 10)),
+            fieldProject('projectId', 'Charge to project', '', { blank: '— none —' })
+          ) +
+          fieldText('note', 'Note', '', { placeholder: 'Built two prototypes' }),
+        onSubmit: function (values) {
+          return App.call('items.txn', values).then(function () {
+            Toast.ok('Movement recorded.');
+            App.reload();
+          });
+        }
+      });
+    });
+  },
+
+  openCount: function (item) {
+    Modal.open({
+      title: 'Stock count — ' + item.name,
+      submitLabel: 'Set stock level',
+      body:
+        '<p class="secondary small">Enter what is actually on the shelf. The difference ' +
+          'against the recorded ' + qty(item.onHand, item.unit) +
+          ' is written as an adjustment, so the history stays intact.</p>' +
+        fieldNumber('quantity', 'Counted quantity', item.onHand, { min: 0 }) +
+        '<div style="height:12px"></div>' +
+        fieldText('note', 'Note', '', { placeholder: 'Quarterly count' }),
+      onSubmit: function (values) {
+        return App.call('items.setStock', {
+          id: item.id, quantity: values.quantity, note: values.note
+        }).then(function () {
+          Toast.ok('Stock level set.');
+          App.reload();
+        });
+      }
+    });
+  },
+
+  openMovements: function () {
+    Modal.open({
+      title: 'Recent stock movements',
+      wide: true,
+      body: '<div id="mv-body">' + loadingPane() + '</div>',
+      footer: '<button class="btn" data-modal-cancel>Close</button>',
+      onMount: function (scope) {
+        App.rpc('items.txns', { limit: 150 }).then(function (rows) {
+          var pane = scope.querySelector('#mv-body');
+          pane.innerHTML = rows.length
+            ? '<div class="table-wrap" style="max-height:480px;overflow-y:auto">' +
+              '<table class="data"><thead><tr><th>Date</th><th>Part</th><th>Type</th>' +
+              '<th class="num">Qty</th><th class="num">Value</th><th>Project</th>' +
+              '</tr></thead><tbody>' +
+              rows.map(function (row) {
+                return '<tr><td class="nowrap small">' + fmtDate(row.date) + '</td>' +
+                  '<td><div>' + esc(row.itemName) + '</div>' +
+                    (row.itemSku ? '<div class="tiny muted mono">' + esc(row.itemSku) + '</div>' : '') +
+                  '</td>' +
+                  '<td>' + badge(row.type) + '</td>' +
+                  '<td class="num">' + (row.quantity > 0 ? '+' : '') + qty(row.quantity) + '</td>' +
+                  '<td class="num">' + money(Math.abs(row.value)) + '</td>' +
+                  '<td class="small">' + (row.projectCode
+                    ? '<span class="badge is-accent">' + esc(row.projectCode) + '</span>'
+                    : '<span class="muted">—</span>') + '</td></tr>';
+              }).join('') + '</tbody></table></div>'
+            : '<p class="muted">No movements recorded yet.</p>';
+        });
+      }
+    });
+  }
+};
+</script>

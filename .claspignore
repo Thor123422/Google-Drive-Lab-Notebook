@@ -1,3 +1,8 @@
+# Push only the Apps Script sources under src/.
+# Patterns are negated for the file types Apps Script accepts, written so
+# they work whether clasp resolves them against the project root or rootDir.
 **/**
-!src/**
-src/**/*.md
+!appsscript.json
+!**/appsscript.json
+!**/*.js
+!**/*.html

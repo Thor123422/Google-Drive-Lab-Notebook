@@ -1,0 +1,242 @@
+<script>
+/* ============================ Dashboard ============================ */
+
+var Dashboard = {
+  render: function (host) {
+    var cached = App.dashboard;
+    if (cached) Dashboard.paint(host, cached);
+
+    App.rpc('app.dashboard').then(function (data) {
+      App.dashboard = data;
+      Dashboard.paint(host, data);
+    }).catch(function (err) {
+      if (!cached) host.innerHTML = App.fatalScreen(err.message);
+    });
+  },
+
+  paint: function (host, data) {
+    var budget = data.budget || {};
+    var stock = data.stock || {};
+    var hasAnything = data.counts.projects > 0;
+
+    if (!hasAnything) {
+      host.innerHTML = Dashboard.welcome();
+      App.bind(host, {
+        'new-project': function () { Projects.openEditor(null); },
+        'seed': function () {
+          App.call('app.seed', {}).then(function (result) {
+            Toast.ok('Sample project added.');
+            App.refreshProjects().then(function () {
+              App.navigate('#/project/' + result.projectId);
+            });
+          });
+        }
+      });
+      return;
+    }
+
+    var forecastTone = budgetTone(
+      budget.budget > 0 ? (budget.forecast / budget.budget) * 100 : null
+    );
+
+    host.innerHTML =
+      App.pageHead('Dashboard',
+        pluralise(data.counts.openProjects, 'open project') + ' · ' +
+        pluralise(data.counts.entries, 'notebook entry', 'notebook entries') + ' · ' +
+        pluralise(data.counts.files, 'file'),
+        '<button class="btn" data-action="new-entry">✎ New entry</button>' +
+        '<button class="btn btn-primary" data-action="new-project">+ New project</button>') +
+
+      '<div class="grid grid-4" style="margin-bottom:16px">' +
+        App.statTile('Committed budget', money(budget.budget, { round: true }),
+          pluralise(data.counts.openProjects, 'active project')) +
+        App.statTile('Spent to date', money(budget.actual, { round: true }),
+          budget.budget > 0
+            ? pct((budget.actual / budget.budget) * 100) + ' of budget'
+            : 'No budgets set') +
+        App.statTile('Forecast total', money(budget.forecast, { round: true }),
+          severityBadge(forecastTone.tone || 'good', forecastTone.label)) +
+        App.statTile('Stock value', money(stock.totalValue, { round: true }),
+          stock.lowStockCount + stock.outOfStockCount > 0
+            ? severityBadge('warning', (stock.lowStockCount + stock.outOfStockCount) + ' need attention')
+            : pluralise(stock.itemCount, 'part') + ' tracked') +
+      '</div>' +
+
+      '<div class="grid grid-2" style="align-items:start">' +
+        Dashboard.attentionCard(data) +
+        Dashboard.budgetCard(data) +
+      '</div>' +
+
+      '<div class="grid grid-2" style="align-items:start;margin-top:14px">' +
+        Dashboard.entriesCard(data) +
+        Dashboard.purchasesCard(data) +
+      '</div>' +
+
+      (data.recentFiles.length ? Dashboard.filesCard(data) : '');
+
+    App.bind(host, {
+      'new-project': function () { Projects.openEditor(null); },
+      'new-entry': function () { Notebook.openEditor(null, ''); },
+      'go-project': function (dataset) { App.navigate('#/project/' + dataset.id); },
+      'go-item': function (dataset) { App.navigate('#/item/' + dataset.id); },
+      'go-purchase': function () { App.navigate('#/purchases'); },
+      'go-entry': function (dataset) {
+        App.navigate('#/project/' + dataset.project + '/notebook?entry=' + dataset.id);
+      },
+      'attention': function (dataset) {
+        if (dataset.projectId) App.navigate('#/project/' + dataset.projectId);
+        else if (dataset.itemId) App.navigate('#/item/' + dataset.itemId);
+        else App.navigate('#/purchases');
+      }
+    });
+  },
+
+  welcome: function () {
+    return '<div style="max-width:620px;margin:40px auto">' +
+      '<div class="card card-pad">' +
+        '<h1 style="margin-bottom:8px">Your notebook is ready</h1>' +
+        '<p class="secondary">Projects are the spine of this app: notebook entries, ' +
+          'uploaded files, bills of materials and spend all hang off a project. ' +
+          'Inventory is shared across all of them.</p>' +
+        '<div class="divider"></div>' +
+        '<div class="row row-wrap">' +
+          '<button class="btn btn-primary" data-action="new-project">Create your first project</button>' +
+          '<button class="btn" data-action="seed">Load a worked example</button>' +
+        '</div>' +
+        '<p class="small muted" style="margin-top:12px;margin-bottom:0">The example is a small ' +
+          'electronics project with stock, a costed BOM and a signed entry, so you can see how ' +
+          'the pieces fit before putting your own work in.</p>' +
+      '</div></div>';
+  },
+
+  attentionCard: function (data) {
+    var rows = data.attention || [];
+    return '<div class="card">' +
+      '<div class="card-head"><h2>Needs attention</h2><div class="spacer"></div>' +
+        (rows.length ? '<span class="badge">' + rows.length + '</span>' : '') +
+      '</div>' +
+      (rows.length
+        ? rows.map(function (row) {
+            var glyphs = { critical: '■', serious: '◆', warning: '▲', good: '●' };
+            var colors = {
+              critical: 'var(--status-critical)', serious: 'var(--status-serious)',
+              warning: 'var(--status-warning)', good: 'var(--status-good)'
+            };
+            return '<div class="attention-row" data-action="attention" ' +
+              'data-project-id="' + attr(row.projectId || '') + '" ' +
+              'data-item-id="' + attr(row.itemId || '') + '">' +
+              '<span class="attention-icon" style="color:' + colors[row.severity] + '" ' +
+                'aria-hidden="true">' + glyphs[row.severity] + '</span>' +
+              '<div><div>' + esc(row.title) + '</div>' +
+              '<div class="small muted">' + esc(row.detail) + '</div></div></div>';
+          }).join('')
+        : '<div class="card-pad secondary small">Nothing is overdue, over budget or out of stock.</div>') +
+      '</div>';
+  },
+
+  budgetCard: function (data) {
+    var rows = data.budgetByProject || [];
+    return '<div class="card">' +
+      '<div class="card-head"><h2>Budget by project</h2><div class="spacer"></div>' +
+        '<a class="btn btn-sm btn-ghost" href="#/budget">All budgets →</a></div>' +
+      (rows.length
+        ? '<div class="table-wrap"><table class="data"><thead><tr>' +
+            '<th>Project</th><th class="num">Spent</th><th class="num">Forecast</th>' +
+            '<th class="num">Budget</th><th>Health</th></tr></thead><tbody>' +
+          rows.map(function (row) {
+            var tone = budgetTone(row.percentForecast);
+            return '<tr class="clickable" data-action="go-project" data-id="' + attr(row.id) + '">' +
+              '<td><div class="bold">' + esc(row.code) + '</div>' +
+                '<div class="small muted truncate" style="max-width:180px">' + esc(row.name) + '</div></td>' +
+              '<td class="num">' + money(row.actual, { round: true }) + '</td>' +
+              '<td class="num">' + money(row.forecast, { round: true }) + '</td>' +
+              '<td class="num">' + (row.budget > 0 ? money(row.budget, { round: true }) : '—') + '</td>' +
+              '<td>' + (row.budget > 0
+                ? severityBadge(tone.tone, tone.label)
+                : '<span class="muted small">—</span>') + '</td></tr>';
+          }).join('') +
+          '</tbody></table></div>'
+        : '<div class="card-pad secondary small">No projects with budgets yet.</div>') +
+      '</div>';
+  },
+
+  entriesCard: function (data) {
+    var rows = data.recentEntries || [];
+    return '<div class="card">' +
+      '<div class="card-head"><h2>Recent notebook entries</h2><div class="spacer"></div>' +
+        '<a class="btn btn-sm btn-ghost" href="#/notebook">All entries →</a></div>' +
+      (rows.length
+        ? rows.map(function (entry) {
+            return '<div class="attention-row" data-action="go-entry" ' +
+              'data-id="' + attr(entry.id) + '" data-project="' + attr(entry.projectId) + '">' +
+              '<div style="flex:1;min-width:0">' +
+                '<div class="truncate">' +
+                  '<span class="muted mono">#' + entry.entryNo + '</span> ' + esc(entry.title) +
+                  (entry.locked ? ' <span class="badge is-good">✓ Signed</span>' : '') +
+                '</div>' +
+                '<div class="small muted">' + esc(entry.projectCode) + ' · ' +
+                  fmtDate(entry.date) + ' · ' + esc(titleCase(entry.type)) +
+                  (entry.linkCount ? ' · ' + pluralise(entry.linkCount, 'link') : '') +
+                '</div>' +
+              '</div></div>';
+          }).join('')
+        : '<div class="card-pad secondary small">No entries yet.</div>') +
+      '</div>';
+  },
+
+  purchasesCard: function (data) {
+    var rows = data.openPurchases || [];
+    return '<div class="card">' +
+      '<div class="card-head"><h2>Open purchases</h2><div class="spacer"></div>' +
+        '<a class="btn btn-sm btn-ghost" href="#/purchases">All purchases →</a></div>' +
+      (rows.length
+        ? '<div class="table-wrap"><table class="data"><thead><tr>' +
+            '<th>Item</th><th>Expected</th><th class="num">Amount</th><th>Status</th>' +
+          '</tr></thead><tbody>' +
+          rows.map(function (row) {
+            return '<tr class="clickable" data-action="go-purchase">' +
+              '<td><div class="truncate" style="max-width:200px">' + esc(row.description) + '</div>' +
+                '<div class="small muted">' + esc(row.vendor || '—') +
+                (row.projectCode ? ' · ' + esc(row.projectCode) : '') + '</div></td>' +
+              '<td>' + (row.expectedDate
+                ? fmtDate(row.expectedDate) +
+                  (row.overdue ? ' <span class="badge is-warning">▲ Overdue</span>' : '')
+                : '<span class="muted">—</span>') + '</td>' +
+              '<td class="num">' + money(row.amount) + '</td>' +
+              '<td>' + badge(row.status) + '</td></tr>';
+          }).join('') +
+          '</tbody></table></div>'
+        : '<div class="card-pad secondary small">Nothing on order.</div>') +
+      '</div>';
+  },
+
+  filesCard: function (data) {
+    return '<div class="card" style="margin-top:14px">' +
+      '<div class="card-head"><h2>Recently added files</h2></div>' +
+      data.recentFiles.map(function (file) {
+        var href = safeUrl(file.url);
+        return '<div class="file-row">' +
+          '<div class="file-icon">' +
+            (file.previewUrl
+              ? '<img src="' + attr(file.previewUrl) + '" alt="" loading="lazy">'
+              : esc(fileExt(file.name))) +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div class="truncate">' +
+              (href ? '<a href="' + href + '" target="_blank" rel="noopener">' + esc(file.name) + '</a>'
+                    : esc(file.name)) +
+            '</div>' +
+            '<div class="small muted">' + esc(titleCase(file.category)) +
+              (file.revision ? ' · rev ' + esc(file.revision) : '') +
+              ' · ' + esc(file.sizeLabel) + '</div>' +
+          '</div>' +
+          (file.projectCode
+            ? '<a class="btn btn-sm btn-ghost" href="#/project/' + attr(file.projectId) +
+              '/files">' + esc(file.projectCode) + '</a>'
+            : '') +
+          '</div>';
+      }).join('') +
+      '</div>';
+  }
+};
+</script>

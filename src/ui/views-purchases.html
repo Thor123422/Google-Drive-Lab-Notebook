@@ -1,0 +1,294 @@
+<script>
+/* ============================ Purchases ============================ */
+
+var Purchases = {
+  filters: { search: '', status: '', projectId: '' },
+
+  renderList: function (host, route) {
+    Purchases.filters.projectId = route.query.project || Purchases.filters.projectId;
+
+    host.innerHTML =
+      App.pageHead('Purchases', 'Planned, on order and received — the spine of actual spend.',
+        '<button class="btn btn-primary" data-action="new">+ New purchase</button>') +
+      '<div id="po-totals" class="grid grid-4" style="margin-bottom:16px"></div>' +
+      '<div class="filters">' +
+        '<input type="search" id="po-search" placeholder="Search vendor, order number, description…" ' +
+          'style="min-width:260px">' +
+        '<select id="po-project"><option value="">All projects</option>' +
+          App.projects.map(function (p) {
+            return '<option value="' + attr(p.id) + '"' +
+              (Purchases.filters.projectId === p.id ? ' selected' : '') + '>' +
+              esc((p.code ? p.code + ' — ' : '') + p.name) + '</option>';
+          }).join('') + '</select>' +
+        '<select id="po-status"><option value="">All statuses</option>' +
+          App.enums.purchaseStatus.map(function (s) {
+            return '<option value="' + attr(s) + '">' + esc(titleCase(s)) + '</option>';
+          }).join('') + '</select>' +
+      '</div>' +
+      '<div class="card"><div id="po-list">' + loadingPane() + '</div></div>';
+
+    function reload() {
+      Purchases.filters.search = document.getElementById('po-search').value;
+      Purchases.filters.projectId = document.getElementById('po-project').value;
+      Purchases.filters.status = document.getElementById('po-status').value;
+      Purchases.loadList();
+    }
+
+    document.getElementById('po-search').addEventListener('input', debounce(reload, 220));
+    document.getElementById('po-project').addEventListener('change', reload);
+    document.getElementById('po-status').addEventListener('change', reload);
+
+    App.bind(host, { 'new': function () { Purchases.openEditor(null); } });
+    Purchases.loadList();
+  },
+
+  loadList: function () {
+    var pane = document.getElementById('po-list');
+    if (!pane) return;
+
+    App.rpc('purchases.list', Purchases.filters).then(function (rows) {
+      if (!pane.isConnected) return;
+
+      var totals = rows.reduce(function (acc, row) {
+        if (row.status === 'received') acc.received += row.amount;
+        else if (row.status === 'ordered') acc.ordered += row.amount;
+        else if (row.status === 'planned') acc.planned += row.amount;
+        if (row.overdue) acc.overdue++;
+        return acc;
+      }, { received: 0, ordered: 0, planned: 0, overdue: 0 });
+
+      var totalsPane = document.getElementById('po-totals');
+      if (totalsPane) {
+        totalsPane.innerHTML =
+          App.statTile('Received', money(totals.received, { round: true }), 'Money actually spent') +
+          App.statTile('On order', money(totals.ordered, { round: true }), 'Committed, not yet arrived') +
+          App.statTile('Planned', money(totals.planned, { round: true }), 'Contemplated only') +
+          App.statTile('Overdue', String(totals.overdue),
+            totals.overdue ? severityBadge('warning', 'Past expected date') : 'Nothing late');
+      }
+
+      if (!rows.length) {
+        pane.innerHTML = emptyState('⇄', 'No purchases recorded',
+          'Record what you order. Receiving a purchase that names an inventory part ' +
+          'also books the stock in.',
+          '<button class="btn btn-primary" data-action="new">+ New purchase</button>');
+        App.bind(pane, { 'new': function () { Purchases.openEditor(null); } });
+        return;
+      }
+
+      pane.innerHTML = '<div class="table-wrap"><table class="data"><thead><tr>' +
+          '<th>Date</th><th>Description</th><th>Project</th><th>Category</th>' +
+          '<th class="num">Qty</th><th class="num">Amount</th><th>Status</th><th></th>' +
+        '</tr></thead><tbody>' +
+        rows.map(function (row) {
+          return '<tr class="clickable" data-action="open" data-id="' + attr(row.id) + '">' +
+            '<td class="nowrap small">' + fmtDate(row.date) + '</td>' +
+            '<td><div>' + esc(row.description) + '</div>' +
+              '<div class="small muted">' +
+                [row.vendor, row.orderNumber].filter(Boolean).map(esc).join(' · ') +
+              '</div></td>' +
+            '<td class="small">' + (row.projectCode
+              ? '<span class="badge is-accent">' + esc(row.projectCode) + '</span>'
+              : '<span class="muted">—</span>') + '</td>' +
+            '<td class="small">' + esc(titleCase(row.category)) + '</td>' +
+            '<td class="num">' + (row.quantity ? qty(row.quantity, row.itemId ? row.unit : '') : '—') + '</td>' +
+            '<td class="num bold">' + money(row.amount) + '</td>' +
+            '<td>' + badge(row.status) +
+              (row.overdue ? ' <span class="badge is-warning">▲ Overdue</span>' : '') + '</td>' +
+            '<td class="right nowrap">' +
+              (row.status === 'ordered' || row.status === 'planned'
+                ? '<button class="btn btn-sm" data-action="receive" data-id="' +
+                  attr(row.id) + '">Receive</button>'
+                : '') +
+            '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+
+      App.bind(pane, {
+        'open': function (dataset) { Purchases.openDetail(dataset.id); },
+        'receive': function (dataset) { Purchases.openReceive(dataset.id); },
+        'new': function () { Purchases.openEditor(null); }
+      });
+    }).catch(function (err) {
+      pane.innerHTML = '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  openDetail: function (id) {
+    App.rpc('purchases.get', { id: id }).then(function (po) {
+      Modal.open({
+        title: po.description,
+        body:
+          '<dl class="kv" style="margin-bottom:14px">' +
+            '<dt>Status</dt><dd>' + badge(po.status) +
+              (po.overdue ? ' ' + severityBadge('warning', 'Overdue') : '') + '</dd>' +
+            '<dt>Vendor</dt><dd>' + (po.vendor ? esc(po.vendor) : '—') + '</dd>' +
+            '<dt>Order number</dt><dd class="mono">' + (po.orderNumber ? esc(po.orderNumber) : '—') + '</dd>' +
+            '<dt>Project</dt><dd>' + (po.projectCode
+              ? esc(po.projectCode + ' — ' + po.projectName) : '<span class="muted">Unassigned</span>') + '</dd>' +
+            '<dt>Category</dt><dd>' + esc(titleCase(po.category)) + '</dd>' +
+            (po.itemId
+              ? '<dt>Part</dt><dd>' + esc(po.itemName) +
+                (po.itemSku ? ' <span class="muted mono">' + esc(po.itemSku) + '</span>' : '') + '</dd>'
+              : '') +
+            '<dt>Quantity</dt><dd>' + qty(po.quantity, po.itemId ? po.unit : '') + '</dd>' +
+            '<dt>Unit cost</dt><dd>' + money(po.unitCost) + '</dd>' +
+            '<dt>Total</dt><dd class="bold">' + money(po.amount) + '</dd>' +
+            '<dt>Ordered</dt><dd>' + fmtDate(po.date) + '</dd>' +
+            '<dt>Expected</dt><dd>' + fmtDate(po.expectedDate) + '</dd>' +
+            (po.receivedDate ? '<dt>Received</dt><dd>' + fmtDate(po.receivedDate) + '</dd>' : '') +
+            (po.note ? '<dt>Note</dt><dd>' + esc(po.note) + '</dd>' : '') +
+          '</dl>' +
+          (po.status === 'received' && po.receiveTxnId
+            ? '<div class="alert is-good"><span class="alert-icon" aria-hidden="true">●</span>' +
+              '<div class="small">Receiving this booked the stock in. Reverting it to ' +
+              '“ordered” will take that movement back out.</div></div>'
+            : ''),
+        footer:
+          (po.status === 'received'
+            ? '<button class="btn" data-action="unreceive">Mark as not received</button>'
+            : '<button class="btn btn-primary" data-action="receive">Receive</button>') +
+          '<button class="btn" data-action="edit">Edit</button>' +
+          '<div class="spacer"></div>' +
+          '<button class="btn btn-danger" data-action="delete">Delete</button>' +
+          '<button class="btn" data-modal-cancel>Close</button>',
+        onMount: function (scope, handle) {
+          App.bind(scope, {
+            'edit': function () { handle.close(); Purchases.openEditor(po); },
+            'receive': function () { handle.close(); Purchases.openReceive(po.id); },
+            'unreceive': function () {
+              App.call('purchases.unreceive', { id: po.id }).then(function () {
+                Toast.ok('Reverted to ordered; the stock movement was removed.');
+                handle.close();
+                App.reload();
+              });
+            },
+            'delete': function () {
+              Modal.confirm({
+                title: 'Delete this purchase?',
+                message: 'The purchase is removed from the budget. Any stock movement it ' +
+                  'created is reversed.',
+                submitLabel: 'Delete'
+              }).then(function (confirmed) {
+                if (!confirmed) return;
+                App.call('purchases.delete', { id: po.id }).then(function () {
+                  Toast.ok('Purchase deleted.');
+                  handle.close();
+                  App.reload();
+                });
+              });
+            }
+          });
+        }
+      });
+    }).catch(function (err) { Toast.err(err.message); });
+  },
+
+  openEditor: function (po, presetProjectId) {
+    var isNew = !po;
+    var p = po || {
+      projectId: presetProjectId || '', date: new Date().toISOString().slice(0, 10),
+      vendor: '', orderNumber: '', description: '', category: 'components',
+      status: 'planned', itemId: '', quantity: 1, unitCost: 0, amount: 0,
+      expectedDate: '', note: ''
+    };
+
+    App.rpc('items.list', { includeInactive: true }).then(function (items) {
+      Modal.open({
+        title: isNew ? 'New purchase' : 'Edit purchase',
+        wide: true,
+        submitLabel: isNew ? 'Create purchase' : 'Save changes',
+        body:
+          fieldRow(
+            fieldText('description', 'Description', p.description, {
+              required: true, placeholder: 'Analog front-end parts'
+            }),
+            fieldProject('projectId', 'Project', p.projectId, { blank: '— unassigned —' })
+          ) +
+          fieldRow(
+            fieldText('vendor', 'Vendor', p.vendor, { placeholder: 'Digi-Key' }),
+            fieldText('orderNumber', 'Order number', p.orderNumber)
+          ) +
+          fieldRow(
+            fieldSelect('category', 'Category', p.category, App.enums.purchaseCategory),
+            fieldSelect('status', 'Status', p.status, App.enums.purchaseStatus, {
+              hint: 'Only “received” counts as money spent.'
+            })
+          ) +
+          fieldSelect('itemId', 'Inventory part (optional)', p.itemId,
+            items.map(function (i) {
+              return { value: i.id, label: i.name + (i.sku ? ' (' + i.sku + ')' : '') };
+            }), {
+              blank: '— not an inventory part —',
+              hint: 'Naming a part means receiving this order books the stock in.'
+            }) +
+          '<div style="height:12px"></div>' +
+          '<div class="grid grid-3" style="margin-bottom:12px">' +
+            fieldNumber('quantity', 'Quantity', p.quantity, { min: 0 }) +
+            fieldNumber('unitCost', 'Unit cost', p.unitCost, { min: 0 }) +
+            fieldNumber('amount', 'Total', p.amount, {
+              min: 0, hint: 'Blank = quantity × unit cost.'
+            }) +
+          '</div>' +
+          fieldRow(
+            fieldDate('date', 'Order date', p.date),
+            fieldDate('expectedDate', 'Expected delivery', p.expectedDate)
+          ) +
+          fieldTextarea('note', 'Note', p.note, { rows: 2 }),
+        onMount: function (scope) {
+          // Keep the total in step unless it has been edited by hand.
+          var quantityInput = scope.querySelector('[data-field="quantity"]');
+          var costInput = scope.querySelector('[data-field="unitCost"]');
+          var totalInput = scope.querySelector('[data-field="amount"]');
+          var manual = false;
+          totalInput.addEventListener('input', function () { manual = true; });
+          function recompute() {
+            if (manual) return;
+            var value = (Number(quantityInput.value) || 0) * (Number(costInput.value) || 0);
+            totalInput.value = value ? Math.round(value * 100) / 100 : '';
+          }
+          quantityInput.addEventListener('input', recompute);
+          costInput.addEventListener('input', recompute);
+        },
+        onSubmit: function (values) {
+          if (!isNew) values.id = po.id;
+          return App.call(isNew ? 'purchases.create' : 'purchases.update', values)
+            .then(function () {
+              Toast.ok(isNew ? 'Purchase created.' : 'Purchase saved.');
+              App.reload();
+            });
+        }
+      });
+    });
+  },
+
+  openReceive: function (id) {
+    App.rpc('purchases.get', { id: id }).then(function (po) {
+      Modal.open({
+        title: 'Receive “' + po.description + '”',
+        submitLabel: 'Mark received',
+        body:
+          '<p class="secondary small">' +
+            (po.itemId
+              ? 'This will book <strong>' + esc(qty(po.quantity, po.unit)) + '</strong> of ' +
+                esc(po.itemName) + ' into stock at ' + money(po.unitCost) + ' each.'
+              : 'This purchase is not tied to an inventory part, so only the spend is recorded.') +
+          '</p>' +
+          fieldDate('date', 'Received on', new Date().toISOString().slice(0, 10)) +
+          (po.itemId
+            ? '<div style="height:12px"></div>' +
+              fieldNumber('quantity', 'Quantity received', po.quantity, {
+                min: 0, hint: 'Change this if a partial shipment arrived.'
+              })
+            : ''),
+        onSubmit: function (values) {
+          values.id = po.id;
+          return App.call('purchases.receive', values).then(function () {
+            Toast.ok('Received.');
+            App.reload();
+          });
+        }
+      });
+    });
+  }
+};
+</script>

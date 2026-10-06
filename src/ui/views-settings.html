@@ -1,0 +1,181 @@
+<script>
+/* ============================= Settings ============================ */
+
+var Settings = {
+  render: function (host) {
+    host.innerHTML = App.pageHead('Settings', 'Workspace, preferences and data.') +
+      '<div id="set-body">' + loadingPane() + '</div>';
+
+    Promise.all([
+      App.rpc('app.status'),
+      App.rpc('app.settings')
+    ]).then(function (results) {
+      var status = results[0];
+      var settings = results[1];
+      App.settings = settings;
+      var pane = document.getElementById('set-body');
+      if (!pane) return;
+
+      pane.innerHTML =
+        '<div class="grid grid-2" style="align-items:start">' +
+
+          '<div class="stack">' +
+            '<div class="card">' +
+              '<div class="card-head"><h2>Workspace</h2></div>' +
+              '<div class="card-pad">' +
+                '<dl class="kv">' +
+                  '<dt>Signed in as</dt><dd>' + esc(status.user || 'unknown') + '</dd>' +
+                  '<dt>Time zone</dt><dd>' + esc(status.timeZone) + '</dd>' +
+                  '<dt>Data</dt><dd>' + (status.spreadsheetUrl
+                    ? '<a href="' + safeUrl(status.spreadsheetUrl) +
+                      '" target="_blank" rel="noopener">Open the spreadsheet ↗</a>'
+                    : '<span class="muted">not created</span>') + '</dd>' +
+                  '<dt>Files</dt><dd>' + (status.rootFolderUrl
+                    ? '<a href="' + safeUrl(status.rootFolderUrl) +
+                      '" target="_blank" rel="noopener">Open the Drive folder ↗</a>'
+                    : '<span class="muted">not created</span>') + '</dd>' +
+                  '<dt>Schema</dt><dd>v' + status.schemaVersion +
+                    (status.schemaVersion !== status.expectedSchemaVersion
+                      ? ' <span class="badge is-warning">▲ expected v' +
+                        status.expectedSchemaVersion + '</span>'
+                      : '') + '</dd>' +
+                '</dl>' +
+                '<div class="divider"></div>' +
+                '<div class="row row-wrap">' +
+                  '<button class="btn" data-action="repair">Repair workspace</button>' +
+                  '<button class="btn" data-action="sweep">Clear upload leftovers</button>' +
+                '</div>' +
+                '<p class="small muted" style="margin:10px 0 0">Repair re-creates any missing ' +
+                  'sheet, column or folder. It never deletes data, so it is safe to run ' +
+                  'whenever something looks wrong.</p>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="card">' +
+              '<div class="card-head"><h2>Preferences</h2></div>' +
+              '<div class="card-pad">' +
+                fieldRow(
+                  fieldText('currency', 'Currency code', settings.currency, { placeholder: 'USD' }),
+                  fieldText('currencySymbol', 'Currency symbol', settings.currencySymbol, {
+                    placeholder: '$'
+                  })
+                ) +
+                fieldRow(
+                  fieldNumber('forecastMonths', 'Forecast horizon (months)',
+                    settings.forecastMonths, { min: 1, max: 60 }),
+                  fieldSelect('theme', 'Theme', settings.theme, [
+                    { value: 'system', label: 'Match the system' },
+                    { value: 'light', label: 'Light' },
+                    { value: 'dark', label: 'Dark' }
+                  ])
+                ) +
+                fieldText('ownerName', 'Your name', settings.ownerName, {
+                  hint: 'Used as the default author on new entries when set.'
+                }) +
+                '<div style="height:12px"></div>' +
+                fieldCheck('allowNegativeStock', 'Allow stock to go negative by default',
+                  settings.allowNegativeStock === 'true',
+                  'Off means a consumption larger than stock on hand is refused.') +
+                '<div class="divider"></div>' +
+                '<button class="btn btn-primary" data-action="save">Save preferences</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+
+          '<div class="stack">' +
+            '<div class="card">' +
+              '<div class="card-head"><h2>Your data</h2></div>' +
+              '<div class="card-pad">' +
+                '<p class="small secondary">Everything lives in your own Drive. The ' +
+                  'spreadsheet is the record — this app is a view onto it, and you can ' +
+                  'open and edit the sheet directly whenever you want.</p>' +
+                '<div class="table-wrap"><table class="data"><thead><tr>' +
+                  '<th>Table</th><th class="num">Rows</th><th></th></tr></thead><tbody>' +
+                  [
+                    ['projects', 'Projects'], ['entries', 'Notebook entries'],
+                    ['files', 'Files'], ['items', 'Inventory items'],
+                    ['txns', 'Stock movements'], ['purchases', 'Purchases'],
+                    ['boms', 'BOMs'], ['bomLines', 'BOM lines'],
+                    ['recurring', 'Recurring costs'], ['audit', 'Audit log']
+                  ].map(function (pair) {
+                    return '<tr><td>' + esc(pair[1]) + '</td>' +
+                      '<td class="num muted">' +
+                      (status.counts[pair[0]] !== undefined ? status.counts[pair[0]] : '—') + '</td>' +
+                      '<td class="right"><button class="btn btn-sm btn-ghost" ' +
+                        'data-action="csv" data-table="' + attr(pair[0]) + '">CSV</button></td></tr>';
+                  }).join('') +
+                '</tbody></table></div>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="card">' +
+              '<div class="card-head"><h2>Recent activity</h2><div class="spacer"></div>' +
+                '<button class="btn btn-sm btn-ghost" data-action="refresh-log">Refresh</button></div>' +
+              '<div id="activity-log">' + loadingPane() + '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+
+      App.bind(pane, {
+        'save': function () {
+          var values = Modal.collect(pane);
+          values.allowNegativeStock = values.allowNegativeStock ? 'true' : 'false';
+          App.call('app.saveSettings', { settings: values }).then(function (saved) {
+            App.settings = saved;
+            App.applyTheme();
+            Toast.ok('Preferences saved.');
+          });
+        },
+        'repair': function () {
+          App.call('app.setup', {}).then(function () {
+            Toast.ok('Workspace checked and repaired.');
+            App.reload();
+          });
+        },
+        'sweep': function () {
+          App.call('app.sweep', {}).then(function (result) {
+            Toast.ok(result.removed
+              ? pluralise(result.removed, 'leftover file') + ' cleared.'
+              : 'Nothing to clear.');
+          });
+        },
+        'csv': function (dataset) {
+          App.call('reports.csv', { table: dataset.table }).then(function (file) {
+            downloadText(file.filename, file.csv, file.mimeType);
+            Toast.ok(pluralise(file.rowCount, 'row') + ' exported.');
+          });
+        },
+        'refresh-log': function () { Settings.loadActivity(); }
+      });
+
+      Settings.loadActivity();
+    }).catch(function (err) {
+      document.getElementById('set-body').innerHTML =
+        '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  loadActivity: function () {
+    var pane = document.getElementById('activity-log');
+    if (!pane) return;
+    pane.innerHTML = loadingPane();
+
+    App.rpc('app.activity', { limit: 40 }).then(function (rows) {
+      if (!pane.isConnected) return;
+      pane.innerHTML = rows.length
+        ? '<div class="table-wrap" style="max-height:420px;overflow-y:auto">' +
+          '<table class="data"><thead><tr><th>When</th><th>Action</th>' +
+          '<th>Detail</th></tr></thead><tbody>' +
+          rows.map(function (row) {
+            return '<tr><td class="nowrap small muted">' + fmtDateTime(row.at) + '</td>' +
+              '<td>' + badge(row.action) + ' <span class="small muted">' +
+                esc(row.entity) + '</span></td>' +
+              '<td class="small">' + esc(row.summary) + '</td></tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<div class="card-pad small muted">Nothing logged yet.</div>';
+    }).catch(function (err) {
+      pane.innerHTML = '<div class="card-pad small muted">' + esc(err.message) + '</div>';
+    });
+  }
+};
+</script>

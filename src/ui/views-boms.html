@@ -1,0 +1,403 @@
+<script>
+/* ======================== Bills of materials ======================= */
+
+var Boms = {
+
+  renderTab: function (body, project, route) {
+    body.innerHTML =
+      '<div class="row row-wrap" style="margin-bottom:14px">' +
+        '<div class="secondary small">A BOM lists what one unit needs. The build ' +
+          'quantity scales it, so costing a run of ten is one number.</div>' +
+        '<div class="spacer"></div>' +
+        '<button class="btn btn-primary" data-action="new">+ New BOM</button>' +
+      '</div>' +
+      '<div id="bom-list">' + loadingPane() + '</div>';
+
+    App.bind(body, { 'new': function () { Boms.openEditor(null, project.id); } });
+    Boms.loadList(project.id, route.query.bom);
+  },
+
+  loadList: function (projectId, openBomId) {
+    var pane = document.getElementById('bom-list');
+    if (!pane) return;
+
+    App.rpc('boms.list', { projectId: projectId }).then(function (boms) {
+      if (!pane.isConnected) return;
+      if (!boms.length) {
+        pane.innerHTML = emptyState('▤', 'No bills of materials',
+          'Add a BOM to price a build and see what you are short of.',
+          '<button class="btn btn-primary" data-action="new">+ New BOM</button>');
+        App.bind(pane, { 'new': function () { Boms.openEditor(null, projectId); } });
+        return;
+      }
+
+      pane.innerHTML = '<div class="grid grid-2">' + boms.map(function (bom) {
+        return '<div class="card card-pad" data-action="open" data-id="' + attr(bom.id) +
+          '" style="cursor:pointer">' +
+          '<div class="row" style="margin-bottom:5px">' +
+            '<span class="badge">rev ' + esc(bom.revision) + '</span>' +
+            badge(bom.status) +
+            '<div class="spacer"></div>' +
+            '<span class="small muted">' + pluralise(bom.lineCount, 'line') + '</span>' +
+          '</div>' +
+          '<h2 style="margin-bottom:10px">' + esc(bom.name) + '</h2>' +
+          '<div class="grid grid-3" style="gap:10px">' +
+            '<div><div class="stat-label">Per unit</div>' +
+              '<div class="bold num">' + money(bom.unitCost) + '</div></div>' +
+            '<div><div class="stat-label">Build of ' + bom.buildQty + '</div>' +
+              '<div class="bold num">' + money(bom.buildCost, { round: true }) + '</div></div>' +
+            '<div><div class="stat-label">Buildable now</div>' +
+              '<div class="bold num">' + bom.buildable + '</div></div>' +
+          '</div>' +
+          (bom.shortfallCost > 0
+            ? '<div style="margin-top:10px">' +
+              severityBadge('warning', money(bom.shortfallCost) + ' of parts to buy') + '</div>'
+            : '<div style="margin-top:10px">' +
+              severityBadge('good', 'Fully covered by stock') + '</div>') +
+          '</div>';
+      }).join('') + '</div>';
+
+      App.bind(pane, {
+        'open': function (dataset) { Boms.openDetail(dataset.id); },
+        'new': function () { Boms.openEditor(null, projectId); }
+      });
+
+      if (openBomId) setTimeout(function () { Boms.openDetail(openBomId); }, 120);
+    }).catch(function (err) {
+      pane.innerHTML = '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  /* ---------------------------- detail ---------------------------- */
+
+  openDetail: function (bomId) {
+    App.rpc('boms.get', { id: bomId }).then(function (rollup) {
+      Modal.open({
+        title: rollup.bom.name + ' — rev ' + rollup.bom.revision,
+        wide: true,
+        body: Boms.detailBody(rollup),
+        footer:
+          '<button class="btn" data-action="add-line">+ Line</button>' +
+          '<button class="btn" data-action="import">Paste BOM</button>' +
+          '<button class="btn" data-action="copy">New revision</button>' +
+          '<div class="spacer"></div>' +
+          (rollup.totals.shortfallCost > 0
+            ? '<button class="btn" data-action="order">Order shortfall</button>' : '') +
+          '<button class="btn btn-primary" data-action="build">Build</button>' +
+          '<button class="btn" data-action="edit">Edit</button>' +
+          '<button class="btn" data-modal-cancel>Close</button>',
+        onMount: function (scope, handle) { Boms.wireDetail(scope, handle, rollup); }
+      });
+    }).catch(function (err) { Toast.err(err.message); });
+  },
+
+  detailBody: function (rollup) {
+    var totals = rollup.totals;
+    var lines = rollup.lines;
+
+    return '<div class="grid grid-4" style="margin-bottom:14px">' +
+        App.statTile('Cost per unit', money(totals.unitCost),
+          pluralise(totals.lineCount, 'line')) +
+        App.statTile('Build of ' + totals.buildQty, money(totals.buildCost, { round: true }),
+          'Including scrap allowance') +
+        App.statTile('Buildable now', String(totals.buildableNow), 'From stock on hand') +
+        App.statTile('Shortfall', money(totals.shortfallCost),
+          totals.shortfallLines
+            ? severityBadge('warning', totals.shortfallLines + ' short')
+            : severityBadge('good', 'All covered')) +
+      '</div>' +
+
+      (totals.unpricedLines
+        ? '<div class="alert is-warning" style="margin-bottom:12px">' +
+          '<span class="alert-icon" aria-hidden="true">▲</span><div class="small">' +
+          pluralise(totals.unpricedLines, 'line has', 'lines have') + ' no unit cost, so the ' +
+          'build total is understated. Set a cost on the part, or override it on the line.' +
+          '</div></div>'
+        : '') +
+
+      (rollup.bom.description
+        ? '<p class="small secondary">' + esc(rollup.bom.description) + '</p>' : '') +
+
+      (lines.length
+        ? '<div class="table-wrap" style="max-height:420px;overflow-y:auto">' +
+          '<table class="data"><thead><tr>' +
+            '<th>#</th><th>Ref</th><th>Part</th><th class="num">Qty/unit</th>' +
+            '<th class="num">Required</th><th class="num">On hand</th>' +
+            '<th class="num">Short</th><th class="num">Unit cost</th>' +
+            '<th class="num">Extended</th><th></th>' +
+          '</tr></thead><tbody>' +
+          lines.map(function (line) {
+            return '<tr>' +
+              '<td class="muted num">' + line.lineNo + '</td>' +
+              '<td class="mono small">' + (line.refDes ? esc(line.refDes) : '—') + '</td>' +
+              '<td><div>' + esc(line.description) + '</div>' +
+                (line.itemSku || line.mpn
+                  ? '<div class="tiny muted mono">' +
+                    [line.itemSku, line.mpn].filter(Boolean).map(esc).join(' · ') + '</div>'
+                  : (line.itemId ? '' : '<div class="tiny muted">Free-text line</div>')) +
+              '</td>' +
+              '<td class="num">' + qty(line.qtyPer) +
+                (line.scrapPct > 0
+                  ? '<div class="tiny muted">+' + line.scrapPct + '% scrap</div>' : '') + '</td>' +
+              '<td class="num">' + qty(line.required) + '</td>' +
+              '<td class="num">' + (line.onHand === null
+                ? '<span class="muted">—</span>' : qty(line.onHand)) + '</td>' +
+              '<td class="num">' + (line.shortfall > 0
+                ? '<span style="color:var(--status-critical);font-weight:600">' +
+                  qty(line.shortfall) + '</span>'
+                : '<span class="muted">—</span>') + '</td>' +
+              '<td class="num">' + (line.priced
+                ? money(line.unitCost) +
+                  (line.unitCostSource === 'override'
+                    ? '<div class="tiny muted">override</div>' : '')
+                : '<span class="muted">not priced</span>') + '</td>' +
+              '<td class="num bold">' + money(line.extCost) + '</td>' +
+              '<td class="right nowrap">' +
+                '<button class="btn btn-sm btn-ghost" data-action="edit-line" ' +
+                  'data-id="' + attr(line.id) + '" aria-label="Edit line">✎</button>' +
+                '<button class="btn btn-sm btn-ghost" data-action="rm-line" ' +
+                  'data-id="' + attr(line.id) + '" aria-label="Delete line">×</button>' +
+              '</td></tr>';
+          }).join('') +
+          '</tbody><tfoot><tr>' +
+            '<td colspan="8" class="right">Build total</td>' +
+            '<td class="num">' + money(totals.buildCost) + '</td><td></td>' +
+          '</tr></tfoot></table></div>'
+        : '<p class="muted small">No lines yet. Add them one at a time, or paste a ' +
+          'CSV/TSV export from your EDA tool.</p>');
+  },
+
+  wireDetail: function (scope, handle, rollup) {
+    var bomId = rollup.bom.id;
+
+    function refresh() {
+      App.rpc('boms.get', { id: bomId }).then(function (fresh) {
+        var body = scope.querySelector('.modal-body');
+        body.innerHTML = Boms.detailBody(fresh);
+        App.bind(body, handlers);
+      });
+    }
+
+    var handlers = {
+      'add-line': function () { Boms.openLineEditor(bomId, null, refresh); },
+      'edit-line': function (dataset) {
+        var line = null;
+        App.rpc('boms.get', { id: bomId }).then(function (fresh) {
+          fresh.lines.forEach(function (l) { if (l.id === dataset.id) line = l; });
+          if (line) Boms.openLineEditor(bomId, line, refresh);
+        });
+      },
+      'rm-line': function (dataset) {
+        App.call('boms.deleteLine', { id: dataset.id }).then(function () { refresh(); });
+      },
+      'import': function () { Boms.openImport(bomId, refresh); },
+      'copy': function () {
+        handle.close();
+        Boms.openCopy(rollup.bom);
+      },
+      'edit': function () {
+        handle.close();
+        Boms.openEditor(rollup.bom, rollup.bom.projectId);
+      },
+      'build': function () {
+        handle.close();
+        Boms.openBuild(rollup);
+      },
+      'order': function () {
+        Modal.confirm({
+          title: 'Create purchases for the shortfall?',
+          message: 'One planned purchase per short line, using each part’s supplier, ' +
+            'unit cost and lead time. Nothing is ordered — they land as "planned" for you to review.',
+          submitLabel: 'Create planned purchases',
+          danger: false
+        }).then(function (confirmed) {
+          if (!confirmed) return;
+          App.call('purchases.shortfall', { bomId: bomId }).then(function (result) {
+            Toast.ok(pluralise(result.created, 'planned purchase') + ' created.');
+            handle.close();
+            App.navigate('#/purchases');
+          });
+        });
+      }
+    };
+
+    App.bind(scope, handlers);
+  },
+
+  /* ---------------------------- editors ---------------------------- */
+
+  openEditor: function (bom, projectId) {
+    var isNew = !bom;
+    var b = bom || {
+      name: '', revision: 'A', description: '', buildQty: 1, status: 'draft', notes: ''
+    };
+
+    Modal.open({
+      title: isNew ? 'New bill of materials' : 'Edit BOM',
+      submitLabel: isNew ? 'Create BOM' : 'Save changes',
+      body:
+        fieldRow(
+          fieldText('name', 'Name', b.name, { required: true, placeholder: 'Controller board' }),
+          fieldText('revision', 'Revision', b.revision, { placeholder: 'A' })
+        ) +
+        fieldRow(
+          fieldNumber('buildQty', 'Build quantity', b.buildQty, {
+            min: 0, hint: 'How many units this run makes.'
+          }),
+          fieldSelect('status', 'Status', b.status, App.enums.bomStatus)
+        ) +
+        fieldTextarea('description', 'Description', b.description, { rows: 2 }) +
+        '<div style="height:12px"></div>' +
+        fieldTextarea('notes', 'Build notes', b.notes, { rows: 3 }),
+      onSubmit: function (values) {
+        values.projectId = projectId;
+        if (!isNew) values.id = bom.id;
+        return App.call(isNew ? 'boms.create' : 'boms.update', values).then(function () {
+          Toast.ok(isNew ? 'BOM created.' : 'BOM saved.');
+          App.reload();
+        });
+      }
+    });
+  },
+
+  openLineEditor: function (bomId, line, onDone) {
+    var isNew = !line;
+    var l = line || {
+      refDes: '', itemId: '', description: '', qtyPer: 1, unitCostOverride: '',
+      scrapPct: 0, note: ''
+    };
+
+    App.rpc('items.list', { includeInactive: true }).then(function (items) {
+      Modal.open({
+        title: isNew ? 'Add BOM line' : 'Edit line ' + line.lineNo,
+        body:
+          fieldRow(
+            fieldText('refDes', 'Reference designators', l.refDes, { placeholder: 'C1, C2, C7' }),
+            fieldNumber('qtyPer', 'Quantity per unit', l.qtyPer, { min: 0 })
+          ) +
+          fieldSelect('itemId', 'Inventory part', l.itemId,
+            items.map(function (i) {
+              return {
+                value: i.id,
+                label: i.name + (i.sku ? ' (' + i.sku + ')' : '') + ' — ' + money(i.unitCost)
+              };
+            }), {
+              blank: '— free-text line —',
+              hint: 'Linking a part pulls its cost and checks stock.'
+            }) +
+          '<div style="height:12px"></div>' +
+          fieldText('description', 'Description', l.description, {
+            placeholder: 'Used when there is no inventory part'
+          }) +
+          '<div style="height:12px"></div>' +
+          fieldRow(
+            fieldNumber('unitCostOverride', 'Unit cost override',
+              l.unitCostOverride === null ? '' : l.unitCostOverride, {
+                min: 0, hint: 'Leave blank to use the catalogue price.'
+              }),
+            fieldNumber('scrapPct', 'Scrap allowance (%)', l.scrapPct, {
+              min: 0, hint: 'Extra quantity to buy for losses.'
+            })
+          ) +
+          fieldText('note', 'Note', l.note),
+        onSubmit: function (values) {
+          values.bomId = bomId;
+          if (!isNew) values.id = line.id;
+          return App.call(isNew ? 'boms.addLine' : 'boms.updateLine', values).then(function () {
+            Toast.ok(isNew ? 'Line added.' : 'Line updated.');
+            if (onDone) onDone();
+          });
+        }
+      });
+    });
+  },
+
+  openImport: function (bomId, onDone) {
+    Modal.open({
+      title: 'Paste a BOM',
+      wide: true,
+      submitLabel: 'Import lines',
+      body:
+        '<p class="secondary small">Paste CSV or tab-separated rows with a header. ' +
+          'Recognised column names: <span class="mono">refdes</span>, ' +
+          '<span class="mono">sku</span> or <span class="mono">mpn</span>, ' +
+          '<span class="mono">description</span>, <span class="mono">qty</span>, ' +
+          '<span class="mono">cost</span>, <span class="mono">scrap</span>. ' +
+          'Parts are matched to the catalogue by SKU or MPN.</p>' +
+        fieldTextarea('text', 'Rows', '', {
+          rows: 12, mono: true,
+          placeholder: 'refdes,mpn,description,qty\nC1 C2,GRM188R61A106,10uF 0603,2\nU1,STM32G474RET6,Main MCU,1'
+        }) +
+        fieldCheck('replace', 'Replace the existing lines', false,
+          'Off by default — imported rows are appended.'),
+      onSubmit: function (values) {
+        values.bomId = bomId;
+        return App.call('boms.import', values).then(function (result) {
+          Toast.ok(pluralise(result.imported, 'line') + ' imported.');
+          if (result.unmatched.length) {
+            Toast.info(pluralise(result.unmatched.length, 'part number') +
+              ' did not match the catalogue and came in as free text.');
+          }
+          if (onDone) onDone();
+        });
+      }
+    });
+  },
+
+  openCopy: function (bom) {
+    Modal.open({
+      title: 'New revision of “' + bom.name + '”',
+      submitLabel: 'Create revision',
+      body:
+        '<p class="secondary small">Copies every line into a fresh draft BOM.</p>' +
+        fieldRow(
+          fieldText('name', 'Name', bom.name),
+          fieldText('revision', 'Revision', '', { placeholder: 'auto (next letter)' })
+        ) +
+        fieldNumber('buildQty', 'Build quantity', bom.buildQty, { min: 0 }) +
+        '<div style="height:12px"></div>' +
+        fieldCheck('supersede', 'Mark rev ' + bom.revision + ' as superseded', true),
+      onSubmit: function (values) {
+        values.id = bom.id;
+        return App.call('boms.copy', values).then(function () {
+          Toast.ok('Revision created.');
+          App.reload();
+        });
+      }
+    });
+  },
+
+  openBuild: function (rollup) {
+    var totals = rollup.totals;
+    Modal.open({
+      title: 'Build ' + rollup.bom.name + ' rev ' + rollup.bom.revision,
+      submitLabel: 'Consume stock',
+      body:
+        '<p class="secondary small">This draws every line’s parts out of stock and ' +
+          'charges them to the project. It is the point at which a BOM becomes real ' +
+          'material cost.</p>' +
+        fieldRow(
+          fieldNumber('quantity', 'Units to build', totals.buildQty, { min: 0 }),
+          fieldDate('date', 'Build date', new Date().toISOString().slice(0, 10))
+        ) +
+        (totals.buildableNow < totals.buildQty
+          ? '<div class="alert is-warning"><span class="alert-icon" aria-hidden="true">▲</span>' +
+            '<div class="small">Stock covers <strong>' + totals.buildableNow +
+            '</strong> unit(s). Building more than that needs the override below.</div></div>' +
+            '<div style="height:10px"></div>'
+          : '') +
+        fieldCheck('allowNegative', 'Allow stock to go negative', false,
+          'Use when you know parts are on the bench but not yet booked in.'),
+      onSubmit: function (values) {
+        values.bomId = rollup.bom.id;
+        return App.call('boms.build', values).then(function (result) {
+          Toast.ok('Built ' + result.built + ' unit(s); ' +
+            pluralise(result.consumed.length, 'line') + ' consumed, ' +
+            money(result.cost) + ' of material.');
+          App.reload();
+        });
+      }
+    });
+  }
+};
+</script>

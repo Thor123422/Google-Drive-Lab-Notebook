@@ -192,6 +192,7 @@ function uploadChunk_(uploadId, offset, base64Data) {
   var response = UrlFetchApp.fetch(session.sessionUri, {
     method: 'put',
     headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
       'Content-Range': 'bytes ' + start + '-' + end + '/' + session.size
     },
     contentType: session.mimeType,
@@ -216,7 +217,11 @@ function uploadChunk_(uploadId, offset, base64Data) {
     var driveId = str_(body.id);
     if (!driveId) fail_('Drive finished the upload but returned no file id.', 'drive_error');
     clearUploadSession_(uploadId);
-    var record = registerUploadedFile_(session, driveId);
+    // Chunk calls run outside the RPC lock so a long upload cannot block
+    // the app; the row insert still has to be serialised.
+    var record = withLock_(function () {
+      return registerUploadedFile_(session, driveId);
+    });
     return { done: true, uploadedBytes: session.size, size: session.size, file: record };
   }
 

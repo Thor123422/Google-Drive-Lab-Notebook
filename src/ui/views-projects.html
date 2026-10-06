@@ -1,0 +1,433 @@
+<script>
+/* ============================= Projects ============================ */
+
+var Projects = {
+  filters: { search: '', status: '', includeArchived: false },
+
+  /* ----------------------------- list ---------------------------- */
+
+  renderList: function (host) {
+    host.innerHTML =
+      App.pageHead('Projects', 'Every project, with its budget position.',
+        '<button class="btn btn-primary" data-action="new">+ New project</button>') +
+      '<div class="filters">' +
+        '<input type="search" id="p-search" placeholder="Filter projects…" value="' +
+          attr(Projects.filters.search) + '" style="min-width:220px">' +
+        '<select id="p-status">' +
+          '<option value="">All active statuses</option>' +
+          App.enums.projectStatus.map(function (s) {
+            return '<option value="' + attr(s) + '"' +
+              (Projects.filters.status === s ? ' selected' : '') + '>' + esc(titleCase(s)) + '</option>';
+          }).join('') +
+        '</select>' +
+        '<label class="checkline"><input type="checkbox" id="p-archived"' +
+          (Projects.filters.includeArchived ? ' checked' : '') + '> Include archived</label>' +
+      '</div>' +
+      '<div id="p-list">' + loadingPane() + '</div>';
+
+    function reload() {
+      Projects.filters.search = document.getElementById('p-search').value;
+      Projects.filters.status = document.getElementById('p-status').value;
+      Projects.filters.includeArchived = document.getElementById('p-archived').checked;
+      Projects.loadList();
+    }
+
+    document.getElementById('p-search').addEventListener('input', debounce(reload, 220));
+    document.getElementById('p-status').addEventListener('change', reload);
+    document.getElementById('p-archived').addEventListener('change', reload);
+
+    App.bind(host, { 'new': function () { Projects.openEditor(null); } });
+    Projects.loadList();
+  },
+
+  loadList: function () {
+    var pane = document.getElementById('p-list');
+    if (!pane) return;
+
+    App.rpc('projects.list', Projects.filters).then(function (projects) {
+      if (!projects.length) {
+        pane.innerHTML = emptyState('▣', 'No projects match',
+          Projects.filters.search || Projects.filters.status
+            ? 'Try clearing the filters.'
+            : 'Create a project to start recording work against it.',
+          '<button class="btn btn-primary" data-action="new">+ New project</button>');
+        App.bind(pane, { 'new': function () { Projects.openEditor(null); } });
+        return;
+      }
+
+      pane.innerHTML = '<div class="grid grid-2">' + projects.map(function (project) {
+        var snapshot = project.budget || {};
+        var tone = budgetTone(snapshot.percentForecast);
+        return '<div class="card card-pad clickable" data-action="open" ' +
+          'data-id="' + attr(project.id) + '" style="cursor:pointer">' +
+          '<div class="row" style="margin-bottom:6px">' +
+            '<span class="mono muted small">' + esc(project.code) + '</span>' +
+            badge(project.status) +
+            (project.priority === 'high' ? '<span class="badge is-serious">◆ High</span>' : '') +
+            '<div class="spacer"></div>' +
+            (project.targetDate
+              ? '<span class="small muted nowrap">' + esc(relativeDate(project.targetDate) ||
+                fmtDate(project.targetDate)) + '</span>'
+              : '') +
+          '</div>' +
+          '<h2 style="margin-bottom:4px">' + esc(project.name) + '</h2>' +
+          (project.objective
+            ? '<p class="small secondary" style="margin-bottom:10px">' +
+              esc(project.objective.slice(0, 150)) +
+              (project.objective.length > 150 ? '…' : '') + '</p>'
+            : '<div style="height:6px"></div>') +
+
+          (snapshot.budget > 0
+            ? budgetMeter(snapshot) +
+              '<div class="row small" style="margin-top:6px">' +
+                '<span class="num">' + money(snapshot.actual, { round: true }) + ' spent</span>' +
+                '<span class="muted">/</span>' +
+                '<span class="num muted">' + money(snapshot.budget, { round: true }) + '</span>' +
+                '<div class="spacer"></div>' +
+                severityBadge(tone.tone, tone.label) +
+              '</div>'
+            : '<div class="small muted">No budget set</div>') +
+
+          '<div class="divider"></div>' +
+          '<div class="row small muted row-wrap" style="gap:14px">' +
+            '<span>✎ ' + pluralise(project.counts.entries, 'entry', 'entries') + '</span>' +
+            '<span>⎙ ' + pluralise(project.counts.files, 'file') + '</span>' +
+            '<span>▤ ' + pluralise(project.counts.boms, 'BOM') + '</span>' +
+            '<span>⇄ ' + pluralise(project.counts.purchases, 'purchase') + '</span>' +
+          '</div>' +
+          (project.tags.length
+            ? '<div style="margin-top:9px">' + tagList(project.tags) + '</div>' : '') +
+          '</div>';
+      }).join('') + '</div>';
+
+      App.bind(pane, {
+        'open': function (dataset) { App.navigate('#/project/' + dataset.id); }
+      });
+    }).catch(function (err) {
+      pane.innerHTML = '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  /* ---------------------------- detail --------------------------- */
+
+  renderDetail: function (host, route) {
+    App.rpc('projects.get', { id: route.id }).then(function (project) {
+      Projects.current = project;
+      var tabs = [
+        { id: 'overview', label: 'Overview' },
+        { id: 'notebook', label: 'Notebook', count: project.counts.entries },
+        { id: 'files', label: 'Files', count: project.counts.files },
+        { id: 'boms', label: 'BOMs', count: project.counts.boms },
+        { id: 'budget', label: 'Budget' }
+      ];
+      var active = route.tab || 'overview';
+
+      host.innerHTML =
+        '<div class="row small" style="margin-bottom:10px">' +
+          '<a href="#/projects" class="muted">← Projects</a>' +
+        '</div>' +
+        App.pageHead(project.name,
+          '<span class="mono">' + esc(project.code) + '</span> · ' +
+          badge(project.status) +
+          (project.startDate ? ' · started ' + fmtDate(project.startDate) : '') +
+          (project.targetDate ? ' · target ' + fmtDate(project.targetDate) : ''),
+          '<button class="btn" data-action="report">⎙ Export report</button>' +
+          '<button class="btn" data-action="share">↗ Share</button>' +
+          '<button class="btn" data-action="edit">Edit</button>') +
+
+        '<div class="tabs">' + tabs.map(function (tab) {
+          return '<button class="tab' + (tab.id === active ? ' is-active' : '') +
+            '" data-action="tab" data-tab="' + attr(tab.id) + '">' + esc(tab.label) +
+            (tab.count !== undefined ? '<span class="tab-count">' + tab.count + '</span>' : '') +
+            '</button>';
+        }).join('') + '</div>' +
+        '<div id="tab-body">' + loadingPane() + '</div>';
+
+      App.bind(host, {
+        'tab': function (dataset) {
+          App.navigate('#/project/' + project.id + '/' + dataset.tab);
+        },
+        'edit': function () { Projects.openEditor(project); },
+        'share': function () { Projects.openShare(project); },
+        'report': function () { Projects.exportReport(project); }
+      });
+
+      var body = document.getElementById('tab-body');
+      var renderers = {
+        overview: Projects.renderOverview,
+        notebook: Notebook.renderTab,
+        files: FilesView.renderTab,
+        boms: Boms.renderTab,
+        budget: BudgetView.renderProject
+      };
+      (renderers[active] || Projects.renderOverview)(body, project, route);
+    }).catch(function (err) {
+      host.innerHTML = emptyState('⚠', 'Project not available', err.message,
+        '<a class="btn btn-primary" href="#/projects">Back to projects</a>');
+    });
+  },
+
+  renderOverview: function (body, project) {
+    var snapshot = project.budget || {};
+    var tone = budgetTone(snapshot.percentForecast);
+
+    body.innerHTML =
+      '<div class="grid grid-4" style="margin-bottom:16px">' +
+        App.statTile('Budget', snapshot.budget > 0 ? money(snapshot.budget, { round: true }) : '—',
+          snapshot.budget > 0 ? severityBadge(tone.tone, tone.label) : 'Not set') +
+        App.statTile('Spent', money(snapshot.actual, { round: true }),
+          snapshot.budget > 0 ? pct(snapshot.percentUsed) + ' of budget' : '') +
+        App.statTile('Committed', money(snapshot.committed, { round: true }), 'On order') +
+        App.statTile('Remaining', money(snapshot.available, { round: true }),
+          'After committed and planned') +
+      '</div>' +
+
+      '<div class="grid grid-2" style="align-items:start">' +
+        '<div class="card">' +
+          '<div class="card-head"><h2>Detail</h2></div>' +
+          '<div class="card-pad">' +
+            (project.objective
+              ? '<h3 class="muted tiny" style="text-transform:uppercase;letter-spacing:.06em">Objective</h3>' +
+                '<p>' + esc(project.objective) + '</p>'
+              : '') +
+            (project.description
+              ? '<h3 class="muted tiny" style="text-transform:uppercase;letter-spacing:.06em;margin-top:12px">Description</h3>' +
+                '<div class="prose">' + markdown(project.description) + '</div>'
+              : '') +
+            (!project.objective && !project.description
+              ? '<p class="muted small">No description yet. Use <strong>Edit</strong> to add one.</p>'
+              : '') +
+            '<div class="divider"></div>' +
+            '<dl class="kv">' +
+              '<dt>Status</dt><dd>' + badge(project.status) + '</dd>' +
+              '<dt>Priority</dt><dd>' + esc(titleCase(project.priority)) + '</dd>' +
+              '<dt>Started</dt><dd>' + fmtDate(project.startDate) + '</dd>' +
+              '<dt>Target</dt><dd>' + fmtDate(project.targetDate) +
+                (project.targetDate && relativeDate(project.targetDate)
+                  ? ' <span class="muted small">(' + esc(relativeDate(project.targetDate)) + ')</span>'
+                  : '') + '</dd>' +
+              (project.closedDate ? '<dt>Closed</dt><dd>' + fmtDate(project.closedDate) + '</dd>' : '') +
+              '<dt>Tags</dt><dd>' + (project.tags.length ? tagList(project.tags) : '<span class="muted">—</span>') + '</dd>' +
+              '<dt>Drive</dt><dd>' + (project.folderId
+                ? '<a href="https://drive.google.com/drive/folders/' + attr(project.folderId) +
+                  '" target="_blank" rel="noopener">Open project folder ↗</a>'
+                : '<span class="muted">Created on first upload</span>') + '</dd>' +
+            '</dl>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="stack">' +
+          '<div class="card">' +
+            '<div class="card-head"><h2>Latest entries</h2><div class="spacer"></div>' +
+              '<button class="btn btn-sm" data-action="new-entry">+ Entry</button></div>' +
+            '<div id="ov-entries">' + loadingPane() + '</div>' +
+          '</div>' +
+          '<div class="card">' +
+            '<div class="card-head"><h2>Key files</h2><div class="spacer"></div>' +
+              '<button class="btn btn-sm" data-action="go-files">All files →</button></div>' +
+            '<div id="ov-files">' + loadingPane() + '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
+    App.bind(body, {
+      'new-entry': function () { Notebook.openEditor(null, project.id); },
+      'go-files': function () { App.navigate('#/project/' + project.id + '/files'); },
+      'go-entry': function (dataset) {
+        App.navigate('#/project/' + project.id + '/notebook?entry=' + dataset.id);
+      }
+    });
+
+    App.rpc('entries.list', { projectId: project.id, limit: 5 }).then(function (entries) {
+      var pane = document.getElementById('ov-entries');
+      if (!pane) return;
+      pane.innerHTML = entries.length
+        ? entries.map(function (entry) {
+            return '<div class="attention-row" data-action="go-entry" data-id="' + attr(entry.id) + '">' +
+              '<div style="flex:1;min-width:0">' +
+                '<div class="truncate"><span class="mono muted">#' + entry.entryNo + '</span> ' +
+                  esc(entry.title) + (entry.locked ? ' <span class="badge is-good">✓</span>' : '') + '</div>' +
+                '<div class="small muted">' + fmtDate(entry.date) + ' · ' + esc(titleCase(entry.type)) + '</div>' +
+              '</div></div>';
+          }).join('')
+        : '<div class="card-pad small muted">No entries yet.</div>';
+      App.bind(pane, {
+        'go-entry': function (dataset) {
+          App.navigate('#/project/' + project.id + '/notebook?entry=' + dataset.id);
+        }
+      });
+    });
+
+    App.rpc('files.list', { projectId: project.id, currentOnly: true }).then(function (files) {
+      var pane = document.getElementById('ov-files');
+      if (!pane) return;
+      pane.innerHTML = files.length
+        ? files.slice(0, 6).map(function (file) {
+            var href = safeUrl(file.url);
+            return '<div class="file-row">' +
+              '<div class="file-icon">' + (file.previewUrl
+                ? '<img src="' + attr(file.previewUrl) + '" alt="" loading="lazy">'
+                : esc(fileExt(file.name))) + '</div>' +
+              '<div style="flex:1;min-width:0"><div class="truncate">' +
+                (href ? '<a href="' + href + '" target="_blank" rel="noopener">' + esc(file.name) + '</a>'
+                      : esc(file.name)) + '</div>' +
+                '<div class="small muted">' + esc(titleCase(file.category)) +
+                  (file.revision ? ' · rev ' + esc(file.revision) : '') + '</div></div>' +
+              '</div>';
+          }).join('')
+        : '<div class="card-pad small muted">No files yet.</div>';
+    });
+  },
+
+  /* ---------------------------- editor --------------------------- */
+
+  openEditor: function (project) {
+    var isNew = !project;
+    var p = project || {
+      code: '', name: '', status: 'planning', priority: 'normal', description: '',
+      objective: '', startDate: '', targetDate: '', tags: [], budgetTotal: 0,
+      currency: App.settings.currency || 'USD'
+    };
+
+    Modal.open({
+      title: isNew ? 'New project' : 'Edit project',
+      wide: true,
+      submitLabel: isNew ? 'Create project' : 'Save changes',
+      body:
+        fieldRow(
+          fieldText('name', 'Project name', p.name, { required: true, placeholder: 'Bench PSU controller' }),
+          fieldText('code', 'Code', p.code, {
+            placeholder: isNew ? 'auto (PRJ-001)' : '',
+            hint: 'Short identifier used in folder names and reports.'
+          })
+        ) +
+        fieldRow(
+          fieldSelect('status', 'Status', p.status, App.enums.projectStatus),
+          fieldSelect('priority', 'Priority', p.priority, App.enums.projectPriority)
+        ) +
+        fieldRow(
+          fieldDate('startDate', 'Start date', p.startDate),
+          fieldDate('targetDate', 'Target date', p.targetDate)
+        ) +
+        fieldRow(
+          fieldNumber('budgetTotal', 'Budget', p.budgetTotal, {
+            min: 0, hint: 'Leave at 0 if this project is not budgeted.'
+          }),
+          fieldText('tags', 'Tags', (p.tags || []).join(', '), {
+            placeholder: 'electronics, rev-b', hint: 'Comma separated.'
+          })
+        ) +
+        '<div style="margin-bottom:12px">' +
+          fieldTextarea('objective', 'Objective', p.objective, {
+            rows: 2, placeholder: 'What does success look like?'
+          }) +
+        '</div>' +
+        fieldTextarea('description', 'Description', p.description, {
+          rows: 5, placeholder: 'Background, scope, constraints. Markdown is supported.'
+        }),
+      onSubmit: function (values) {
+        var action = isNew ? 'projects.create' : 'projects.update';
+        if (!isNew) values.id = project.id;
+        return App.call(action, values).then(function (saved) {
+          Toast.ok(isNew ? 'Project created.' : 'Project saved.');
+          return App.refreshProjects().then(function () {
+            if (isNew) App.navigate('#/project/' + saved.id);
+            else App.reload();
+          });
+        });
+      }
+    });
+  },
+
+  /* ---------------------------- sharing -------------------------- */
+
+  openShare: function (project) {
+    Modal.open({
+      title: 'Share “' + project.name + '”',
+      submitLabel: 'Share with person',
+      body:
+        '<p class="secondary small">Sharing works through Drive. Collaborators see the ' +
+          'project folder and its files; they do not need access to this app.</p>' +
+        '<div class="card card-pad" style="margin-bottom:14px">' +
+          '<h3 style="margin-bottom:6px">Link sharing</h3>' +
+          '<div class="row row-wrap">' +
+            '<button class="btn btn-sm" data-action="link-view">Anyone with link: view</button>' +
+            '<button class="btn btn-sm" data-action="link-edit">Anyone with link: edit</button>' +
+            '<button class="btn btn-sm" data-action="link-off">Turn off</button>' +
+          '</div>' +
+          '<div id="share-result" class="small" style="margin-top:10px"></div>' +
+        '</div>' +
+        '<h3 style="margin-bottom:6px">Invite someone</h3>' +
+        fieldRow(
+          fieldText('email', 'Email address', '', { type: 'email', placeholder: 'name@example.com' }),
+          fieldSelect('role', 'Access', 'view', [
+            { value: 'view', label: 'Can view' }, { value: 'edit', label: 'Can edit' }
+          ])
+        ) +
+        '<div class="alert is-info" style="margin-top:4px">' +
+          '<span class="alert-icon" aria-hidden="true">●</span>' +
+          '<div class="small">To send someone a readable snapshot instead, use ' +
+            '<strong>Export report</strong> — it writes a Google Doc of the notebook, ' +
+            'BOMs and budget into this project’s folder.</div></div>',
+      onMount: function (scope) {
+        function setSharing(access) {
+          var result = scope.querySelector('#share-result');
+          result.innerHTML = '<span class="spinner"></span> Updating…';
+          App.rpc('files.share', { projectId: project.id, access: access })
+            .then(function (res) {
+              result.innerHTML = access === 'private'
+                ? 'Link sharing is off. Only you and people you invite can open the folder.'
+                : 'Link sharing on (' + esc(access) + '). ' +
+                  '<a href="' + safeUrl(res.url) + '" target="_blank" rel="noopener">Open folder ↗</a>';
+            })
+            .catch(function (err) {
+              result.innerHTML = '<span style="color:var(--status-critical)">' +
+                esc(err.message) + '</span>';
+            });
+        }
+        App.bind(scope, {
+          'link-view': function () { setSharing('view'); },
+          'link-edit': function () { setSharing('edit'); },
+          'link-off': function () { setSharing('private'); }
+        });
+      },
+      onSubmit: function (values) {
+        if (!values.email) { Toast.err('Enter an email address to invite someone.'); return false; }
+        return App.call('files.shareWith', {
+          projectId: project.id, email: values.email, role: values.role
+        }).then(function () {
+          Toast.ok('Shared with ' + values.email + '.');
+        });
+      }
+    });
+  },
+
+  exportReport: function (project) {
+    Modal.open({
+      title: 'Export project report',
+      submitLabel: 'Generate Google Doc',
+      body:
+        '<p class="secondary small">Writes a Google Doc into this project’s Drive folder: ' +
+          'a point-in-time record you can share with someone who does not use this app.</p>' +
+        fieldCheck('includeEntries', 'Notebook entries (with their references)', true) +
+        fieldCheck('includeBudget', 'Budget summary and category breakdown', true) +
+        fieldCheck('includeBoms', 'Bills of materials, costed', true) +
+        fieldCheck('includeFiles', 'File index with links', true),
+      onSubmit: function (values) {
+        values.projectId = project.id;
+        Toast.info('Building the report…');
+        return App.call('reports.project', values).then(function (doc) {
+          Toast.ok('Report created.');
+          Modal.open({
+            title: 'Report ready',
+            body: '<p>Saved to the project folder as:</p><p><strong>' + esc(doc.name) + '</strong></p>' +
+              '<p><a class="btn btn-primary" href="' + safeUrl(doc.url) +
+              '" target="_blank" rel="noopener">Open the document ↗</a></p>',
+            footer: '<button class="btn" data-modal-cancel>Close</button>'
+          });
+        });
+      }
+    });
+  }
+};
+</script>

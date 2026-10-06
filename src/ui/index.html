@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lab Notebook</title>
+  <?!= include('ui/styles'); ?>
+</head>
+<body>
+  <div id="root">
+    <div class="loading-pane"><span class="spinner"></span> Loading your notebook…</div>
+  </div>
+  <div id="modal-root"></div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+  <script>
+    // Server state, inlined so the first paint needs no round trip.
+    window.__BOOT__ = <?!= bootstrapJson ?>;
+  </script>
+
+  <?!= include('ui/components'); ?>
+  <?!= include('ui/charts'); ?>
+  <?!= include('ui/views-dashboard'); ?>
+  <?!= include('ui/views-projects'); ?>
+  <?!= include('ui/views-notebook'); ?>
+  <?!= include('ui/views-files'); ?>
+  <?!= include('ui/views-inventory'); ?>
+  <?!= include('ui/views-purchases'); ?>
+  <?!= include('ui/views-boms'); ?>
+  <?!= include('ui/views-budget'); ?>
+  <?!= include('ui/views-settings'); ?>
+  <?!= include('ui/app'); ?>
+</body>
+</html>

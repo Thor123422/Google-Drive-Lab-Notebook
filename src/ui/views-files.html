@@ -1,0 +1,515 @@
+<script>
+/* ============================== Files ============================== */
+
+var FilesView = {
+
+  /* ------------------------ project files tab --------------------- */
+
+  renderTab: function (body, project, route) {
+    body.innerHTML =
+      '<div class="filters">' +
+        '<input type="search" id="f-search" placeholder="Search files…" style="min-width:220px">' +
+        '<select id="f-category"><option value="">All categories</option>' +
+          App.enums.fileCategory.map(function (c) {
+            return '<option value="' + attr(c) + '">' + esc(titleCase(c)) + '</option>';
+          }).join('') +
+        '</select>' +
+        '<label class="checkline"><input type="checkbox" id="f-current" checked> ' +
+          'Current revisions only</label>' +
+        '<div class="spacer"></div>' +
+        '<button class="btn" data-action="link">↗ Link a Drive file</button>' +
+        '<button class="btn btn-primary" data-action="upload">↑ Upload</button>' +
+      '</div>' +
+      '<div id="dropzone" class="dropzone" style="margin-bottom:14px">' +
+        'Drop files here to upload them into <strong>' + esc(project.code || project.name) +
+        '</strong>, or use the Upload button.' +
+      '</div>' +
+      '<div class="card"><div id="f-list">' + loadingPane() + '</div></div>';
+
+    function reload() {
+      FilesView.loadList('f-list', {
+        projectId: project.id,
+        search: document.getElementById('f-search').value,
+        category: document.getElementById('f-category').value,
+        currentOnly: document.getElementById('f-current').checked
+      }, project);
+    }
+    FilesView.reloadCurrent = reload;
+
+    document.getElementById('f-search').addEventListener('input', debounce(reload, 220));
+    document.getElementById('f-category').addEventListener('change', reload);
+    document.getElementById('f-current').addEventListener('change', reload);
+
+    App.bind(body, {
+      'upload': function () { FilesView.openUpload(project.id); },
+      'link': function () { FilesView.openLink(project.id); }
+    });
+
+    FilesView.wireDropzone(document.getElementById('dropzone'), project.id);
+    reload();
+
+    if (route.query.file) {
+      setTimeout(function () { FilesView.openDetail(route.query.file); }, 120);
+    }
+  },
+
+  /* ------------------------- all files view ----------------------- */
+
+  renderAll: function (host) {
+    host.innerHTML =
+      App.pageHead('Files', 'Everything uploaded or linked, across all projects.',
+        '<button class="btn btn-primary" data-action="upload">↑ Upload</button>') +
+      '<div class="filters">' +
+        '<input type="search" id="fa-search" placeholder="Search files…" style="min-width:240px">' +
+        '<select id="fa-project"><option value="">All projects</option>' +
+          App.projects.map(function (p) {
+            return '<option value="' + attr(p.id) + '">' +
+              esc((p.code ? p.code + ' — ' : '') + p.name) + '</option>';
+          }).join('') +
+        '</select>' +
+        '<select id="fa-category"><option value="">All categories</option>' +
+          App.enums.fileCategory.map(function (c) {
+            return '<option value="' + attr(c) + '">' + esc(titleCase(c)) + '</option>';
+          }).join('') +
+        '</select>' +
+      '</div>' +
+      '<div class="card"><div id="fa-list">' + loadingPane() + '</div></div>';
+
+    function reload() {
+      FilesView.loadList('fa-list', {
+        search: document.getElementById('fa-search').value,
+        projectId: document.getElementById('fa-project').value,
+        category: document.getElementById('fa-category').value
+      }, null);
+    }
+    FilesView.reloadCurrent = reload;
+
+    document.getElementById('fa-search').addEventListener('input', debounce(reload, 220));
+    document.getElementById('fa-project').addEventListener('change', reload);
+    document.getElementById('fa-category').addEventListener('change', reload);
+
+    App.bind(host, {
+      'upload': function () {
+        var projectId = document.getElementById('fa-project').value ||
+          (App.projects[0] && App.projects[0].id);
+        if (!projectId) { Toast.err('Create a project first — files belong to one.'); return; }
+        FilesView.openUpload(projectId);
+      }
+    });
+
+    reload();
+  },
+
+  loadList: function (paneId, filters, project) {
+    var pane = document.getElementById(paneId);
+    if (!pane) return;
+
+    App.rpc('files.list', filters).then(function (files) {
+      if (!pane.isConnected) return;
+      if (!files.length) {
+        pane.innerHTML = emptyState('⎙', 'No files here yet',
+          'Upload schematics, board files, Gerbers, datasheets, photos or measurement ' +
+          'data, then reference them from notebook entries.');
+        return;
+      }
+
+      var groups = {};
+      files.forEach(function (file) {
+        (groups[file.category] = groups[file.category] || []).push(file);
+      });
+
+      pane.innerHTML = Object.keys(groups).map(function (category) {
+        return '<div class="result-group-label" style="padding:10px 14px 4px">' +
+            esc(titleCase(category)) + ' <span class="muted">(' + groups[category].length + ')</span>' +
+          '</div>' +
+          groups[category].map(function (file) {
+            var href = safeUrl(file.url);
+            return '<div class="file-row">' +
+              '<div class="file-icon">' + (file.previewUrl
+                ? '<img src="' + attr(file.previewUrl) + '" alt="" loading="lazy">'
+                : esc(fileExt(file.name))) + '</div>' +
+              '<div style="flex:1;min-width:0">' +
+                '<div class="truncate">' +
+                  (href
+                    ? '<a href="' + href + '" target="_blank" rel="noopener">' + esc(file.name) + '</a>'
+                    : esc(file.name)) +
+                  (file.revision ? ' <span class="badge">rev ' + esc(file.revision) + '</span>' : '') +
+                  (file.supersededBy
+                    ? ' <span class="badge is-warning">▲ Superseded</span>' : '') +
+                  (file.source === 'link' ? ' <span class="badge">Linked</span>' : '') +
+                '</div>' +
+                '<div class="small muted truncate">' +
+                  esc(file.sizeLabel) + ' · ' + fmtDate(file.uploadedAt) +
+                  (!project && file.projectCode ? ' · ' + esc(file.projectCode) : '') +
+                  (file.description ? ' · ' + esc(file.description) : '') +
+                '</div>' +
+              '</div>' +
+              '<button class="btn btn-sm btn-ghost" data-action="detail" ' +
+                'data-id="' + attr(file.id) + '">Details</button>' +
+              '</div>';
+          }).join('');
+      }).join('');
+
+      App.bind(pane, {
+        'detail': function (dataset) { FilesView.openDetail(dataset.id); }
+      });
+    }).catch(function (err) {
+      pane.innerHTML = '<div class="alert is-critical">' + esc(err.message) + '</div>';
+    });
+  },
+
+  /* ---------------------------- dropzone -------------------------- */
+
+  wireDropzone: function (zone, projectId) {
+    if (!zone) return;
+    ['dragenter', 'dragover'].forEach(function (type) {
+      zone.addEventListener(type, function (event) {
+        event.preventDefault();
+        zone.classList.add('is-over');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (type) {
+      zone.addEventListener(type, function (event) {
+        event.preventDefault();
+        zone.classList.remove('is-over');
+      });
+    });
+    zone.addEventListener('drop', function (event) {
+      var files = Array.prototype.slice.call(event.dataTransfer.files || []);
+      if (files.length) FilesView.openUpload(projectId, files);
+    });
+    zone.addEventListener('click', function () { FilesView.openUpload(projectId); });
+  },
+
+  /* ----------------------------- upload --------------------------- */
+
+  openUpload: function (projectId, droppedFiles) {
+    var queue = droppedFiles ? droppedFiles.slice() : [];
+
+    Modal.open({
+      title: 'Upload files',
+      wide: true,
+      submitLabel: 'Start upload',
+      body:
+        fieldRow(
+          fieldProject('projectId', 'Project', projectId, { blank: undefined }),
+          fieldSelect('category', 'Category', 'other', App.enums.fileCategory, {
+            hint: 'Used to group files and to label references.'
+          })
+        ) +
+        fieldRow(
+          fieldText('revision', 'Revision', '', { placeholder: 'B, v2, 2026-10-06' }),
+          fieldText('tags', 'Tags', '', { placeholder: 'rev-b, released' })
+        ) +
+        '<div style="margin-bottom:12px">' +
+          fieldText('description', 'Description', '', {
+            placeholder: 'Rev B schematic as released to fab'
+          }) +
+        '</div>' +
+        '<div class="field" style="margin-bottom:12px">' +
+          '<label for="upload-input">Files</label>' +
+          '<input type="file" id="upload-input" multiple>' +
+          '<span class="hint">Large files are sent to Drive in chunks, so CAD and ' +
+            'Gerber archives are fine. Keep this tab open until the upload finishes.</span>' +
+        '</div>' +
+        '<div id="upload-queue"></div>',
+      onMount: function (scope) {
+        var input = scope.querySelector('#upload-input');
+
+        function paintQueue() {
+          var pane = scope.querySelector('#upload-queue');
+          pane.innerHTML = queue.length
+            ? '<div class="card"><div class="card-head"><h3>' +
+                pluralise(queue.length, 'file') + ' queued</h3></div>' +
+              queue.map(function (file, i) {
+                return '<div class="file-row" data-queue-row="' + i + '">' +
+                  '<div class="file-icon">' + esc(fileExt(file.name)) + '</div>' +
+                  '<div style="flex:1;min-width:0">' +
+                    '<div class="truncate">' + esc(file.name) + '</div>' +
+                    '<div class="small muted" data-queue-status>' +
+                      FilesView.humanBytes(file.size) + ' · waiting</div>' +
+                    '<div class="progress-track" style="margin-top:5px;display:none" data-queue-track>' +
+                      '<div class="progress-bar" style="width:0%"></div></div>' +
+                  '</div></div>';
+              }).join('') + '</div>'
+            : '';
+        }
+
+        input.addEventListener('change', function () {
+          queue = Array.prototype.slice.call(input.files || []);
+          paintQueue();
+        });
+
+        if (queue.length) {
+          paintQueue();
+          // A DataTransfer keeps the native input in step with dropped files.
+          try {
+            var transfer = new DataTransfer();
+            queue.forEach(function (file) { transfer.items.add(file); });
+            input.files = transfer.files;
+          } catch (err) {
+            // Not supported everywhere; the queue array is what we upload from.
+          }
+        }
+      },
+      onSubmit: function (values, handle) {
+        var input = handle.node.querySelector('#upload-input');
+        var files = queue.length ? queue : Array.prototype.slice.call(input.files || []);
+        if (!files.length) { Toast.err('Choose at least one file.'); return false; }
+        if (!values.projectId) { Toast.err('Pick a project.'); return false; }
+
+        var rows = handle.node.querySelectorAll('[data-queue-row]');
+
+        function uploadAt(index) {
+          if (index >= files.length) {
+            Toast.ok(pluralise(files.length, 'file') + ' uploaded.');
+            if (FilesView.reloadCurrent) FilesView.reloadCurrent();
+            return Promise.resolve(true);
+          }
+          var file = files[index];
+          var row = rows[index];
+          var status = row ? row.querySelector('[data-queue-status]') : null;
+          var track = row ? row.querySelector('[data-queue-track]') : null;
+          var bar = track ? track.querySelector('.progress-bar') : null;
+          if (track) track.style.display = '';
+
+          return FilesView.uploadOne(file, {
+            projectId: values.projectId,
+            category: values.category,
+            revision: values.revision,
+            description: values.description,
+            tags: values.tags
+          }, function (sent, total) {
+            if (bar) bar.style.width = Math.round((sent / total) * 100) + '%';
+            if (status) {
+              status.textContent = FilesView.humanBytes(sent) + ' of ' +
+                FilesView.humanBytes(total) + ' · ' + Math.round((sent / total) * 100) + '%';
+            }
+          }).then(function () {
+            if (status) status.innerHTML = '<span style="color:var(--success-text)">● Uploaded</span>';
+            return uploadAt(index + 1);
+          }).catch(function (err) {
+            if (status) {
+              status.innerHTML = '<span style="color:var(--status-critical)">■ ' +
+                esc(err.message) + '</span>';
+            }
+            Toast.err(file.name + ': ' + err.message);
+            return uploadAt(index + 1);
+          });
+        }
+
+        return uploadAt(0);
+      }
+    });
+  },
+
+  /**
+   * Send one file to Drive through the resumable session the server
+   * opened. Chunks go one at a time so progress is real and a failure
+   * never loses more than the current slice.
+   */
+  uploadOne: function (file, meta, onProgress) {
+    return App.rpc('files.beginUpload', {
+      projectId: meta.projectId,
+      name: file.name,
+      size: file.size,
+      mimeType: file.type || 'application/octet-stream',
+      category: meta.category,
+      revision: meta.revision,
+      description: meta.description,
+      tags: meta.tags,
+      entryId: meta.entryId || ''
+    }).then(function (session) {
+      var chunkBytes = session.chunkBytes;
+
+      function sendFrom(offset) {
+        if (offset >= file.size) {
+          // A zero-byte file still needs one empty-ish PUT to close out.
+          return Promise.resolve(null);
+        }
+        var slice = file.slice(offset, Math.min(offset + chunkBytes, file.size));
+
+        return FilesView.sliceToBase64(slice).then(function (base64) {
+          return App.rpc('files.uploadChunk', {
+            uploadId: session.uploadId,
+            offset: offset,
+            data: base64
+          });
+        }).then(function (result) {
+          if (onProgress) onProgress(Math.min(result.uploadedBytes, file.size), file.size);
+          if (result.done) return result.file;
+          return sendFrom(result.uploadedBytes);
+        });
+      }
+
+      return sendFrom(0).catch(function (err) {
+        App.rpc('files.abortUpload', { uploadId: session.uploadId }).catch(function () {});
+        throw err;
+      });
+    });
+  },
+
+  sliceToBase64: function (blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var result = String(reader.result || '');
+        var comma = result.indexOf(',');
+        resolve(comma === -1 ? '' : result.slice(comma + 1));
+      };
+      reader.onerror = function () { reject(new Error('Could not read the file.')); };
+      reader.readAsDataURL(blob);
+    });
+  },
+
+  humanBytes: function (bytes) {
+    var b = Number(bytes) || 0;
+    var units = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+    return (i === 0 ? b : b.toFixed(b < 10 ? 1 : 0)) + ' ' + units[i];
+  },
+
+  /* ----------------------- link an existing file ------------------- */
+
+  openLink: function (projectId) {
+    Modal.open({
+      title: 'Link a file already in Drive',
+      submitLabel: 'Link file',
+      body:
+        '<p class="secondary small">Paste a Drive link or file id. Useful for files too ' +
+          'large to upload through the browser, or ones you keep somewhere else in Drive.</p>' +
+        fieldText('driveIdOrUrl', 'Drive link or file id', '', {
+          required: true, placeholder: 'https://drive.google.com/file/d/…/view'
+        }) +
+        '<div style="height:12px"></div>' +
+        fieldRow(
+          fieldProject('projectId', 'Project', projectId, { blank: undefined }),
+          fieldSelect('category', 'Category', 'other', App.enums.fileCategory)
+        ) +
+        fieldRow(
+          fieldText('revision', 'Revision', '', { placeholder: 'B' }),
+          fieldSelect('mode', 'Filing', 'reference', [
+            { value: 'reference', label: 'Leave it where it is' },
+            { value: 'move', label: 'Also add to the project folder' }
+          ])
+        ) +
+        fieldText('description', 'Description', ''),
+      onSubmit: function (values) {
+        return App.call('files.link', values).then(function () {
+          Toast.ok('File linked.');
+          if (FilesView.reloadCurrent) FilesView.reloadCurrent();
+        });
+      }
+    });
+  },
+
+  /* ---------------------------- detail ----------------------------- */
+
+  openDetail: function (fileId) {
+    App.rpc('files.get', { id: fileId }).then(function (file) {
+      var href = safeUrl(file.url);
+      Modal.open({
+        title: file.name,
+        wide: true,
+        body:
+          (file.previewUrl
+            ? '<div style="text-align:center;margin-bottom:14px">' +
+              '<img src="' + attr(file.previewUrl) + '" alt="Preview of ' + attr(file.name) +
+              '" style="max-width:100%;max-height:260px;border-radius:var(--radius);' +
+              'border:1px solid var(--border)"></div>'
+            : '') +
+          '<dl class="kv" style="margin-bottom:14px">' +
+            '<dt>Category</dt><dd>' + badge(file.category) + '</dd>' +
+            '<dt>Revision</dt><dd>' + (file.revision ? esc(file.revision) : '<span class="muted">—</span>') + '</dd>' +
+            '<dt>Size</dt><dd>' + esc(file.sizeLabel) + '</dd>' +
+            '<dt>Type</dt><dd class="mono">' + esc(file.mimeType || '—') + '</dd>' +
+            '<dt>Added</dt><dd>' + fmtDateTime(file.uploadedAt) + '</dd>' +
+            '<dt>Source</dt><dd>' + (file.source === 'link'
+              ? 'Linked from Drive' : 'Uploaded through the app') + '</dd>' +
+            (file.description ? '<dt>Notes</dt><dd>' + esc(file.description) + '</dd>' : '') +
+            (file.tags.length ? '<dt>Tags</dt><dd>' + tagList(file.tags) + '</dd>' : '') +
+            (file.supersededBy
+              ? '<dt>Superseded by</dt><dd>' + esc(file.supersededBy.name) +
+                (file.supersededBy.revision ? ' (rev ' + esc(file.supersededBy.revision) + ')' : '') +
+                '</dd>'
+              : '') +
+          '</dl>' +
+          (href ? '<p><a class="btn" href="' + href +
+            '" target="_blank" rel="noopener">Open in Drive ↗</a></p>' : '') +
+          '<div class="divider"></div>' +
+          '<h3 style="margin-bottom:7px">Referenced by</h3>' +
+          (file.backlinks && file.backlinks.length
+            ? '<div class="stack-sm">' + file.backlinks.map(function (link) {
+                return '<div class="small">' +
+                  '<span class="mono muted">#' + link.entryNo + '</span> ' +
+                  esc(link.title) + ' <span class="muted">· ' + fmtDate(link.date) + '</span>' +
+                  (link.note ? '<div class="muted tiny">' + esc(link.note) + '</div>' : '') +
+                  '</div>';
+              }).join('') + '</div>'
+            : '<p class="small muted">No notebook entry references this file yet.</p>'),
+        footer:
+          '<button class="btn" data-action="edit">Edit details</button>' +
+          '<div class="spacer"></div>' +
+          '<button class="btn btn-danger" data-action="delete">Remove</button>' +
+          '<button class="btn" data-modal-cancel>Close</button>',
+        onMount: function (scope, handle) {
+          App.bind(scope, {
+            'edit': function () { handle.close(); FilesView.openEdit(file); },
+            'delete': function () {
+              handle.close();
+              FilesView.confirmDelete(file);
+            }
+          });
+        }
+      });
+    }).catch(function (err) { Toast.err(err.message); });
+  },
+
+  openEdit: function (file) {
+    Modal.open({
+      title: 'Edit file details',
+      body:
+        fieldText('name', 'Name', file.name, { required: true }) +
+        '<div style="height:12px"></div>' +
+        fieldRow(
+          fieldSelect('category', 'Category', file.category, App.enums.fileCategory),
+          fieldText('revision', 'Revision', file.revision)
+        ) +
+        fieldText('description', 'Description', file.description) +
+        '<div style="height:12px"></div>' +
+        fieldText('tags', 'Tags', (file.tags || []).join(', ')),
+      onSubmit: function (values) {
+        values.id = file.id;
+        return App.call('files.update', values).then(function () {
+          Toast.ok('File updated.');
+          if (FilesView.reloadCurrent) FilesView.reloadCurrent();
+        });
+      }
+    });
+  },
+
+  confirmDelete: function (file) {
+    Modal.open({
+      title: 'Remove “' + file.name + '”?',
+      body:
+        '<p>This removes the file record and any notebook references to it.</p>' +
+        (file.source === 'upload'
+          ? fieldCheck('trashDriveFile', 'Also move the file to the Drive trash', false,
+              'Leave this off to keep the file in Drive and only drop it from the notebook.')
+          : '<div class="alert is-info"><span class="alert-icon" aria-hidden="true">●</span>' +
+            '<div class="small">This file was linked rather than uploaded, so the original ' +
+            'in Drive is never touched.</div></div>'),
+      footer: '<button class="btn" data-modal-cancel>Cancel</button>' +
+        '<button class="btn btn-danger" data-modal-submit>Remove file</button>',
+      onSubmit: function (values) {
+        return App.call('files.delete', { id: file.id, trashDriveFile: values.trashDriveFile })
+          .then(function () {
+            Toast.ok('File removed.');
+            if (FilesView.reloadCurrent) FilesView.reloadCurrent();
+          });
+      }
+    });
+  }
+};
+</script>

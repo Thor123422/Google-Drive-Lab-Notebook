@@ -290,7 +290,7 @@ function update_(tableKey, id, patch) {
   var width = state.headers.length || def.columns.length;
   var values = state.sheet.getRange(existing._row, 1, 1, width).getValues()[0];
   def.columns.forEach(function (col) {
-    var pos = state.colIndex[col.name];
+    var pos = state.colIndex ? state.colIndex[col.name] : undefined;
     if (pos === undefined) return;
     values[pos] = encodeCell_(merged[col.name], col);
   });

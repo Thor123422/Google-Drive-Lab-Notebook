@@ -1,0 +1,525 @@
+<script>
+/* ==================================================================
+   components.html — formatting, markdown, modals, toasts.
+   Everything here is pure browser code with no server dependency.
+   ================================================================== */
+
+/* ---------------------------- escaping ---------------------------- */
+
+function esc(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Only http(s) URLs are ever emitted into an href. */
+function safeUrl(value) {
+  var s = String(value == null ? '' : value).trim();
+  return /^https?:\/\//i.test(s) ? esc(s) : '';
+}
+
+function attr(value) { return esc(value); }
+
+/* --------------------------- formatting --------------------------- */
+
+function money(amount, opts) {
+  var options = opts || {};
+  var n = Number(amount);
+  if (!isFinite(n)) return '—';
+  var symbol = (App.settings && App.settings.currencySymbol) || '$';
+  var decimals = options.round && Math.abs(n) >= 1000 ? 0 : 2;
+  var text = Math.abs(n).toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  });
+  return (n < 0 ? '−' : '') + symbol + text;
+}
+
+/** Compact form for axis ticks: $1.2k, $3.4M. */
+function moneyShort(amount) {
+  var n = Number(amount) || 0;
+  var symbol = (App.settings && App.settings.currencySymbol) || '$';
+  var abs = Math.abs(n);
+  var sign = n < 0 ? '−' : '';
+  if (abs >= 1000000) return sign + symbol + (abs / 1000000).toFixed(abs >= 10000000 ? 0 : 1) + 'M';
+  if (abs >= 1000) return sign + symbol + (abs / 1000).toFixed(abs >= 10000 ? 0 : 1) + 'k';
+  return sign + symbol + abs.toFixed(0);
+}
+
+function qty(value, unit) {
+  var n = Number(value);
+  if (!isFinite(n)) return '—';
+  var text = (Math.round(n * 10000) / 10000).toLocaleString();
+  return unit ? text + ' ' + unit : text;
+}
+
+function pct(value, digits) {
+  if (value === null || value === undefined || !isFinite(Number(value))) return '—';
+  return Number(value).toFixed(digits === undefined ? 0 : digits) + '%';
+}
+
+function fmtDate(value) {
+  if (!value) return '—';
+  var s = String(value).slice(0, 10);
+  var parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!parts) return esc(value);
+  var d = new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]));
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function fmtDateTime(value) {
+  if (!value) return '—';
+  var d = new Date(String(value).replace(' ', 'T'));
+  if (isNaN(d.getTime())) return esc(value);
+  return d.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+}
+
+/** "3 days ago" / "in 2 weeks" for dates near today. */
+function relativeDate(value) {
+  if (!value) return '';
+  var s = String(value).slice(0, 10);
+  var parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!parts) return '';
+  var then = new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]));
+  var now = new Date();
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  var days = Math.round((then - today) / 86400000);
+  if (days === 0) return 'today';
+  if (days === 1) return 'tomorrow';
+  if (days === -1) return 'yesterday';
+  if (days < 0 && days > -31) return Math.abs(days) + ' days ago';
+  if (days > 0 && days < 31) return 'in ' + days + ' days';
+  return '';
+}
+
+function titleCase(value) {
+  var s = String(value == null ? '' : value).replace(/_/g, ' ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function pluralise(count, singular, plural) {
+  return count + ' ' + (count === 1 ? singular : (plural || singular + 's'));
+}
+
+/* ----------------------------- badges ----------------------------- */
+
+var STATUS_TONE = {
+  planning: '', active: 'is-accent', on_hold: 'is-warning',
+  complete: 'is-good', archived: '',
+  draft: '', final: 'is-good',
+  planned: '', ordered: 'is-accent', received: 'is-good', cancelled: '',
+  released: 'is-good', superseded: ''
+};
+
+function badge(label, tone) {
+  var cls = tone === undefined ? (STATUS_TONE[label] || '') : tone;
+  return '<span class="badge ' + cls + '">' + esc(titleCase(label)) + '</span>';
+}
+
+/** Status badges always pair colour with a glyph and a word. */
+function severityBadge(severity, label) {
+  var glyphs = { good: '●', warning: '▲', serious: '◆', critical: '■' };
+  var tone = 'is-' + severity;
+  return '<span class="badge ' + tone + '">' +
+    '<span aria-hidden="true">' + (glyphs[severity] || '●') + '</span>' +
+    esc(label) + '</span>';
+}
+
+function tagList(tags) {
+  if (!tags || !tags.length) return '';
+  return tags.map(function (t) { return '<span class="tag">' + esc(t) + '</span>'; }).join(' ');
+}
+
+/* --------------------------- empty state --------------------------- */
+
+function emptyState(icon, title, message, actionHtml) {
+  return '<div class="empty">' +
+    '<div class="empty-icon" aria-hidden="true">' + esc(icon) + '</div>' +
+    '<h3>' + esc(title) + '</h3>' +
+    (message ? '<p>' + esc(message) + '</p>' : '') +
+    (actionHtml || '') +
+    '</div>';
+}
+
+function loadingPane(message) {
+  return '<div class="loading-pane"><span class="spinner"></span>' +
+    esc(message || 'Loading…') + '</div>';
+}
+
+/* ---------------------------- markdown ----------------------------- */
+
+/**
+ * A deliberately small Markdown subset: headings, lists, emphasis,
+ * code, quotes, rules and links. Everything is escaped before any
+ * formatting is applied, so note text can never inject markup.
+ */
+function markdown(text) {
+  var src = String(text == null ? '' : text).replace(/\r\n/g, '\n');
+  if (!src.trim()) return '<p class="muted">No content.</p>';
+
+  var lines = src.split('\n');
+  var html = [];
+  var listType = null;
+  var inCode = false;
+  var codeLines = [];
+
+  function closeList() {
+    if (listType) { html.push('</' + listType + '>'); listType = null; }
+  }
+
+  function inline(s) {
+    var out = esc(s);
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      function (m, label, url) {
+        return '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + label + '</a>';
+      });
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    out = out.replace(/(^|\s)(https?:\/\/[^\s<]+)/g,
+      function (m, lead, url) {
+        return lead + '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + url + '</a>';
+      });
+    return out;
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+
+    if (/^```/.test(line.trim())) {
+      if (inCode) {
+        html.push('<pre><code>' + esc(codeLines.join('\n')) + '</code></pre>');
+        codeLines = [];
+        inCode = false;
+      } else {
+        closeList();
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) { codeLines.push(line); continue; }
+
+    if (!line.trim()) { closeList(); continue; }
+
+    var heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      closeList();
+      var level = Math.min(heading[1].length + 1, 6);
+      html.push('<h' + level + '>' + inline(heading[2]) + '</h' + level + '>');
+      continue;
+    }
+
+    if (/^(\s*)([-*_])\s*\2\s*\2[\s\S]*$/.test(line) && /^[\s\-*_]+$/.test(line)) {
+      closeList();
+      html.push('<hr>');
+      continue;
+    }
+
+    var quote = /^>\s?(.*)$/.exec(line);
+    if (quote) {
+      closeList();
+      html.push('<blockquote>' + inline(quote[1]) + '</blockquote>');
+      continue;
+    }
+
+    var bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
+    if (bullet) {
+      if (listType !== 'ul') { closeList(); html.push('<ul>'); listType = 'ul'; }
+      html.push('<li>' + inline(bullet[1]) + '</li>');
+      continue;
+    }
+
+    var numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (numbered) {
+      if (listType !== 'ol') { closeList(); html.push('<ol>'); listType = 'ol'; }
+      html.push('<li>' + inline(numbered[1]) + '</li>');
+      continue;
+    }
+
+    closeList();
+    html.push('<p>' + inline(line) + '</p>');
+  }
+
+  if (inCode && codeLines.length) {
+    html.push('<pre><code>' + esc(codeLines.join('\n')) + '</code></pre>');
+  }
+  closeList();
+  return html.join('');
+}
+
+/* ----------------------------- toasts ------------------------------ */
+
+var Toast = {
+  show: function (message, kind, ttl) {
+    var host = document.getElementById('toasts');
+    if (!host) return;
+    var node = document.createElement('div');
+    node.className = 'toast is-' + (kind || 'info');
+    node.innerHTML = '<div>' + esc(message) + '</div>' +
+      '<button class="toast-close" aria-label="Dismiss">×</button>';
+    node.querySelector('.toast-close').addEventListener('click', function () { node.remove(); });
+    host.appendChild(node);
+    var life = ttl === undefined ? (kind === 'error' ? 9000 : 4200) : ttl;
+    if (life > 0) setTimeout(function () { node.remove(); }, life);
+  },
+  ok: function (m) { this.show(m, 'success'); },
+  err: function (m) { this.show(m, 'error'); },
+  info: function (m) { this.show(m, 'info'); }
+};
+
+/* ----------------------------- modals ------------------------------ */
+
+var Modal = {
+  stack: [],
+
+  /**
+   * open({ title, body, footer, wide, onMount, onSubmit })
+   * `onSubmit` makes the modal a form: Enter submits, and the handler
+   * receives the collected field values.
+   */
+  open: function (config) {
+    var self = this;
+    var root = document.getElementById('modal-root');
+    var backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+
+    var footer = config.footer !== undefined ? config.footer :
+      '<button class="btn" data-modal-cancel>Cancel</button>' +
+      '<button class="btn btn-primary" data-modal-submit>' +
+      esc(config.submitLabel || 'Save') + '</button>';
+
+    backdrop.innerHTML =
+      '<div class="modal' + (config.wide ? ' wide' : '') + '" role="dialog" aria-modal="true">' +
+        '<div class="modal-head">' +
+          '<h2>' + esc(config.title || '') + '</h2>' +
+          '<div class="spacer"></div>' +
+          '<button class="btn btn-ghost btn-icon" data-modal-cancel aria-label="Close">×</button>' +
+        '</div>' +
+        '<form class="modal-form"><div class="modal-body">' + (config.body || '') + '</div>' +
+        (footer ? '<div class="modal-foot">' + footer + '</div>' : '') +
+        '</form>' +
+      '</div>';
+
+    var handle = { node: backdrop, config: config };
+
+    function close() {
+      backdrop.remove();
+      self.stack = self.stack.filter(function (h) { return h !== handle; });
+      document.removeEventListener('keydown', onKey);
+      if (config.onClose) config.onClose();
+    }
+    handle.close = close;
+
+    function onKey(event) {
+      if (event.key === 'Escape' && self.stack[self.stack.length - 1] === handle) {
+        event.stopPropagation();
+        close();
+      }
+    }
+
+    backdrop.addEventListener('click', function (event) {
+      if (event.target === backdrop) close();
+      if (event.target.closest('[data-modal-cancel]')) { event.preventDefault(); close(); }
+    });
+
+    var form = backdrop.querySelector('.modal-form');
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (!config.onSubmit) { close(); return; }
+      var button = form.querySelector('[data-modal-submit]');
+      var values = Modal.collect(backdrop);
+      var result = config.onSubmit(values, handle);
+      if (result && typeof result.then === 'function') {
+        if (button) { button.disabled = true; button.dataset.label = button.textContent; button.textContent = 'Working…'; }
+        result.then(function (keepOpen) {
+          if (keepOpen !== false) close();
+          else if (button) { button.disabled = false; button.textContent = button.dataset.label; }
+        }).catch(function () {
+          if (button) { button.disabled = false; button.textContent = button.dataset.label; }
+        });
+      } else if (result !== false) {
+        close();
+      }
+    });
+
+    document.addEventListener('keydown', onKey);
+    root.appendChild(backdrop);
+    this.stack.push(handle);
+
+    var firstField = backdrop.querySelector('input:not([type=hidden]), select, textarea');
+    if (firstField) setTimeout(function () { firstField.focus(); }, 30);
+    if (config.onMount) config.onMount(backdrop, handle);
+    return handle;
+  },
+
+  /** Read every [data-field] control inside a container into an object. */
+  collect: function (scope) {
+    var values = {};
+    scope.querySelectorAll('[data-field]').forEach(function (node) {
+      var key = node.getAttribute('data-field');
+      if (node.type === 'checkbox') values[key] = node.checked;
+      else if (node.type === 'number') values[key] = node.value === '' ? '' : Number(node.value);
+      else values[key] = node.value;
+    });
+    return values;
+  },
+
+  closeTop: function () {
+    var top = this.stack[this.stack.length - 1];
+    if (top) top.close();
+  },
+
+  /** Promise-based confirm with a typed-name guard when `confirmText` is set. */
+  confirm: function (config) {
+    return new Promise(function (resolve) {
+      var needsTyping = !!config.confirmText;
+      var body = '<p>' + esc(config.message) + '</p>' +
+        (config.detail ? '<div class="alert is-warning"><span class="alert-icon" aria-hidden="true">▲</span><div>' + esc(config.detail) + '</div></div>' : '') +
+        (needsTyping
+          ? '<div class="field" style="margin-top:12px"><label>Type <strong>' +
+            esc(config.confirmText) + '</strong> to confirm</label>' +
+            '<input type="text" data-field="confirmation" autocomplete="off"></div>'
+          : '');
+
+      Modal.open({
+        title: config.title || 'Are you sure?',
+        body: body,
+        submitLabel: config.submitLabel || 'Confirm',
+        footer: '<button class="btn" data-modal-cancel>Cancel</button>' +
+          '<button class="btn ' + (config.danger === false ? 'btn-primary' : 'btn-danger') +
+          '" data-modal-submit>' + esc(config.submitLabel || 'Confirm') + '</button>',
+        onSubmit: function (values) {
+          if (needsTyping && String(values.confirmation || '').trim() !== config.confirmText) {
+            Toast.err('That does not match. Nothing was changed.');
+            return false;
+          }
+          resolve(true);
+          return true;
+        },
+        onClose: function () { resolve(false); }
+      });
+    });
+  }
+};
+
+/* ------------------------- form field helpers ---------------------- */
+
+function fieldText(key, label, value, options) {
+  var o = options || {};
+  return '<div class="field">' +
+    '<label for="f_' + attr(key) + '">' + esc(label) + '</label>' +
+    '<input id="f_' + attr(key) + '" type="' + (o.type || 'text') + '" data-field="' + attr(key) + '"' +
+      ' value="' + attr(value == null ? '' : value) + '"' +
+      (o.placeholder ? ' placeholder="' + attr(o.placeholder) + '"' : '') +
+      (o.step ? ' step="' + attr(o.step) + '"' : '') +
+      (o.min !== undefined ? ' min="' + attr(o.min) + '"' : '') +
+      (o.required ? ' required' : '') + '>' +
+    (o.hint ? '<span class="hint">' + esc(o.hint) + '</span>' : '') +
+    '</div>';
+}
+
+function fieldNumber(key, label, value, options) {
+  var o = Object.assign({ type: 'number', step: 'any' }, options || {});
+  return fieldText(key, label, value, o);
+}
+
+function fieldDate(key, label, value, options) {
+  return fieldText(key, label, value ? String(value).slice(0, 10) : '',
+    Object.assign({ type: 'date' }, options || {}));
+}
+
+function fieldTextarea(key, label, value, options) {
+  var o = options || {};
+  return '<div class="field">' +
+    '<label for="f_' + attr(key) + '">' + esc(label) + '</label>' +
+    '<textarea id="f_' + attr(key) + '" data-field="' + attr(key) + '"' +
+      (o.rows ? ' rows="' + attr(o.rows) + '"' : '') +
+      (o.mono ? ' class="code"' : '') +
+      (o.placeholder ? ' placeholder="' + attr(o.placeholder) + '"' : '') +
+      '>' + esc(value == null ? '' : value) + '</textarea>' +
+    (o.hint ? '<span class="hint">' + esc(o.hint) + '</span>' : '') +
+    '</div>';
+}
+
+/** options: array of strings, or { value, label } objects. */
+function fieldSelect(key, label, value, options, config) {
+  var c = config || {};
+  var html = '<div class="field"><label for="f_' + attr(key) + '">' + esc(label) + '</label>' +
+    '<select id="f_' + attr(key) + '" data-field="' + attr(key) + '">';
+  if (c.blank !== undefined) {
+    html += '<option value=""' + (!value ? ' selected' : '') + '>' + esc(c.blank) + '</option>';
+  }
+  (options || []).forEach(function (option) {
+    var val = typeof option === 'string' ? option : option.value;
+    var text = typeof option === 'string' ? titleCase(option) : option.label;
+    html += '<option value="' + attr(val) + '"' +
+      (String(val) === String(value) ? ' selected' : '') + '>' + esc(text) + '</option>';
+  });
+  html += '</select>' + (c.hint ? '<span class="hint">' + esc(c.hint) + '</span>' : '') + '</div>';
+  return html;
+}
+
+function fieldCheck(key, label, checked, hint) {
+  return '<div class="field"><label class="checkline">' +
+    '<input type="checkbox" data-field="' + attr(key) + '"' + (checked ? ' checked' : '') + '>' +
+    '<span>' + esc(label) + '</span></label>' +
+    (hint ? '<span class="hint">' + esc(hint) + '</span>' : '') + '</div>';
+}
+
+function fieldProject(key, label, value, config) {
+  var options = (App.projects || []).map(function (p) {
+    return { value: p.id, label: (p.code ? p.code + ' — ' : '') + p.name };
+  });
+  return fieldSelect(key, label, value, options, config || { blank: '— none —' });
+}
+
+function fieldRow() {
+  var parts = Array.prototype.slice.call(arguments);
+  return '<div class="grid grid-2" style="margin-bottom:12px">' + parts.join('') + '</div>';
+}
+
+/* ------------------------------ misc ------------------------------- */
+
+function debounce(fn, wait) {
+  var timer = null;
+  return function () {
+    var args = arguments;
+    var self = this;
+    clearTimeout(timer);
+    timer = setTimeout(function () { fn.apply(self, args); }, wait);
+  };
+}
+
+/** Icon label for a file, derived from the extension. */
+function fileExt(name) {
+  var m = /\.([A-Za-z0-9]{1,6})$/.exec(String(name || ''));
+  return m ? m[1].toUpperCase().slice(0, 4) : 'FILE';
+}
+
+function downloadText(filename, text, mimeType) {
+  var blob = new Blob([text], { type: mimeType || 'text/plain' });
+  var url = URL.createObjectURL(blob);
+  var link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+}
+
+/** Budget health band — drives colour AND the word beside it. */
+function budgetTone(percent) {
+  if (percent === null || percent === undefined) return { tone: '', label: 'No budget set' };
+  if (percent > 100) return { tone: 'critical', label: 'Over budget' };
+  if (percent > 90) return { tone: 'serious', label: 'Near limit' };
+  if (percent > 75) return { tone: 'warning', label: 'Watch' };
+  return { tone: 'good', label: 'On track' };
+}
+</script>

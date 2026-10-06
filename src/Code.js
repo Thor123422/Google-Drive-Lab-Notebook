@@ -8,11 +8,25 @@
 
 function doGet(e) {
   var template = HtmlService.createTemplateFromFile('ui/index');
-  template.bootstrapJson = JSON.stringify(initialPayload_());
+  template.bootstrapJson = safeJson_(initialPayload_());
   return template.evaluate()
     .setTitle(APP_NAME())
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * JSON for embedding inside a <script> block.
+ *
+ * A project name or notebook title containing "</script>" would
+ * otherwise close the tag early, so the sequence is escaped along with
+ * the two line separators that are literal newlines in JS strings.
+ */
+function safeJson_(value) {
+  return JSON.stringify(value)
+    .replace(/<\//g, '<\\/')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 /** Used by the HTML templates to inline partials. */
